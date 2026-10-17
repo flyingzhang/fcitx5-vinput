@@ -119,6 +119,21 @@ SplitPair(std::string_view text, std::string_view delimiter,
   return std::make_pair(first, second);
 }
 
+inline std::optional<std::pair<std::string_view, std::string_view>>
+SplitPairRight(std::string_view text, char delimiter, bool trim_whitespace = false) noexcept {
+  const size_t pos = text.rfind(delimiter);
+  if (pos == std::string_view::npos) {
+    return std::nullopt;
+  }
+  std::string_view first = text.substr(0, pos);
+  std::string_view second = text.substr(pos + 1);
+  if (trim_whitespace) {
+    first = TrimAsciiWhitespaceView(first);
+    second = TrimAsciiWhitespaceView(second);
+  }
+  return std::make_pair(first, second);
+}
+
 inline char ToLowerAsciiChar(char ch) noexcept {
   if (ch >= 'A' && ch <= 'Z') {
     return static_cast<char>(ch - 'A' + 'a');
@@ -195,6 +210,53 @@ inline std::vector<std::string_view> SplitLines(std::string_view text) {
     start = end + 1;
   }
   return lines;
+}
+
+template <typename Callback>
+inline void DrainLinesFromBuffer(std::string& buffer, Callback on_line, bool flush_tail = false) {
+  size_t processed = 0;
+  size_t start = 0;
+  bool should_stop = false;
+
+  while (start < buffer.size()) {
+    const size_t end = buffer.find('\n', start);
+    if (end == std::string::npos) {
+      break;
+    }
+    size_t len = end - start;
+    if (len > 0 && buffer[start + len - 1] == '\r') {
+      --len;
+    }
+    const std::string_view line(buffer.data() + start, len);
+    start = end + 1;
+    processed = start;
+
+    if constexpr (std::is_void_v<std::invoke_result_t<Callback, std::string_view>>) {
+      on_line(line);
+    } else {
+      if (!static_cast<bool>(on_line(line))) {
+        should_stop = true;
+        break;
+      }
+    }
+  }
+
+  if (processed > 0) {
+    buffer.erase(0, processed);
+  }
+
+  if (flush_tail && !should_stop && !buffer.empty()) {
+    std::string_view tail(buffer);
+    if (!tail.empty() && tail.back() == '\r') {
+      tail.remove_suffix(1);
+    }
+    if constexpr (std::is_void_v<std::invoke_result_t<Callback, std::string_view>>) {
+      on_line(tail);
+    } else {
+      (void)on_line(tail);
+    }
+    buffer.clear();
+  }
 }
 
 template <typename Container>

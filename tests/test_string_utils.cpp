@@ -282,6 +282,42 @@ void TestSplitPair() {
   }
 }
 
+void TestSplitPairRight() {
+  using vinput::str::SplitPairRight;
+
+  // Split on rightmost delimiter
+  const auto pair1 = SplitPairRight("a:b:c", ':');
+  TEST_ASSERT(pair1.has_value());
+  if (pair1.has_value()) {
+    TEST_ASSERT(pair1->first == "a:b" && pair1->second == "c");
+  }
+
+  // Hotword score pattern
+  const auto pair2 = SplitPairRight("alpha:beta:3.5", ':');
+  TEST_ASSERT(pair2.has_value());
+  if (pair2.has_value()) {
+    TEST_ASSERT(pair2->first == "alpha:beta" && pair2->second == "3.5");
+  }
+
+  // Trim whitespace
+  const auto pair3 = SplitPairRight("  foo:bar  :  10  ", ':', /*trim_whitespace=*/true);
+  TEST_ASSERT(pair3.has_value());
+  if (pair3.has_value()) {
+    TEST_ASSERT(pair3->first == "foo:bar" && pair3->second == "10");
+  }
+
+  // Without trim whitespace
+  const auto pair4 = SplitPairRight("  foo:bar  :  10  ", ':', /*trim_whitespace=*/false);
+  TEST_ASSERT(pair4.has_value());
+  if (pair4.has_value()) {
+    TEST_ASSERT(pair4->first == "  foo:bar  " && pair4->second == "  10  ");
+  }
+
+  // No delimiter present
+  TEST_ASSERT(!SplitPairRight("no_delim", ':').has_value());
+  TEST_ASSERT(!SplitPairRight("", ':').has_value());
+}
+
 void TestJoin() {
   using vinput::str::Join;
 
@@ -375,6 +411,108 @@ void TestMaskSecret() {
   TEST_ASSERT(MaskSecret("secret", kMax, 0) == "******");
 }
 
+void TestDrainLinesFromBuffer() {
+  using vinput::str::DrainLinesFromBuffer;
+
+  // 1. Standard LF multi-line draining
+  {
+    std::string buffer = "first\nsecond\nthird\n";
+    std::vector<std::string> lines;
+    DrainLinesFromBuffer(buffer, [&](std::string_view line) { lines.emplace_back(line); });
+    TEST_ASSERT(lines.size() == 3);
+    TEST_ASSERT(lines[0] == "first");
+    TEST_ASSERT(lines[1] == "second");
+    TEST_ASSERT(lines[2] == "third");
+    TEST_ASSERT(buffer.empty());
+  }
+
+  // 2. CRLF multi-line draining (\r stripped)
+  {
+    std::string buffer = "hello\r\nworld\r\n";
+    std::vector<std::string> lines;
+    DrainLinesFromBuffer(buffer, [&](std::string_view line) { lines.emplace_back(line); });
+    TEST_ASSERT(lines.size() == 2);
+    TEST_ASSERT(lines[0] == "hello");
+    TEST_ASSERT(lines[1] == "world");
+    TEST_ASSERT(buffer.empty());
+  }
+
+  // 3. Partial tail without trailing newline, flush_tail = false
+  {
+    std::string buffer = "first\npartial tail";
+    std::vector<std::string> lines;
+    DrainLinesFromBuffer(buffer, [&](std::string_view line) { lines.emplace_back(line); }, false);
+    TEST_ASSERT(lines.size() == 1);
+    TEST_ASSERT(lines[0] == "first");
+    TEST_ASSERT(buffer == "partial tail");
+
+    // Append more and drain again
+    buffer += " completed\n";
+    DrainLinesFromBuffer(buffer, [&](std::string_view line) { lines.emplace_back(line); }, false);
+    TEST_ASSERT(lines.size() == 2);
+    TEST_ASSERT(lines[1] == "partial tail completed");
+    TEST_ASSERT(buffer.empty());
+  }
+
+  // 4. Partial tail with flush_tail = true
+  {
+    std::string buffer = "first\nfinal tail";
+    std::vector<std::string> lines;
+    DrainLinesFromBuffer(buffer, [&](std::string_view line) { lines.emplace_back(line); }, true);
+    TEST_ASSERT(lines.size() == 2);
+    TEST_ASSERT(lines[0] == "first");
+    TEST_ASSERT(lines[1] == "final tail");
+    TEST_ASSERT(buffer.empty());
+  }
+
+  // 5. Partial tail with \r and flush_tail = true
+  {
+    std::string buffer = "carriage tail\r";
+    std::vector<std::string> lines;
+    DrainLinesFromBuffer(buffer, [&](std::string_view line) { lines.emplace_back(line); }, true);
+    TEST_ASSERT(lines.size() == 1);
+    TEST_ASSERT(lines[0] == "carriage tail");
+    TEST_ASSERT(buffer.empty());
+  }
+
+  // 6. Empty buffer
+  {
+    std::string buffer;
+    int call_count = 0;
+    DrainLinesFromBuffer(buffer, [&](std::string_view) { ++call_count; }, true);
+    TEST_ASSERT(call_count == 0);
+    TEST_ASSERT(buffer.empty());
+  }
+
+  // 7. Pure newlines
+  {
+    std::string buffer = "\n\n";
+    std::vector<std::string> lines;
+    DrainLinesFromBuffer(buffer, [&](std::string_view line) { lines.emplace_back(line); });
+    TEST_ASSERT(lines.size() == 2);
+    TEST_ASSERT(lines[0].empty());
+    TEST_ASSERT(lines[1].empty());
+    TEST_ASSERT(buffer.empty());
+  }
+
+  // 8. Early break with bool return
+  {
+    std::string buffer = "line1\nline2\nline3\n";
+    std::vector<std::string> lines;
+    DrainLinesFromBuffer(
+        buffer,
+        [&](std::string_view line) -> bool {
+          lines.emplace_back(line);
+          return false; // stop immediately after line1
+        },
+        true);
+    TEST_ASSERT(lines.size() == 1);
+    TEST_ASSERT(lines[0] == "line1");
+    // line1 was processed and removed, line2 and line3 remain in buffer
+    TEST_ASSERT(buffer == "line2\nline3\n");
+  }
+}
+
 int main() {
   TestTrimAsciiWhitespace();
   TestToLowerAndToUpperAscii();
@@ -386,8 +524,10 @@ int main() {
   TestStripSuffix();
   TestConsumePrefix();
   TestSplitPair();
+  TestSplitPairRight();
   TestJoin();
   TestJoinKeyValue();
   TestMaskSecret();
+  TestDrainLinesFromBuffer();
   return 0;
 }
