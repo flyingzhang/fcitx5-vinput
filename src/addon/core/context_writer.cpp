@@ -29,15 +29,14 @@ bool AsyncContextWriter::Enqueue(std::string json_line, int max_lines) {
   if (max_lines <= 0 || json_line.empty()) {
     return true;
   }
-  if (json_line.size() > kMaxPendingBytes) {
-    const std::lock_guard<std::mutex> lock(mutex_);
-    ++dropped_;
-    return false;
-  }
   bool lost_entries = false;
   {
     const std::lock_guard<std::mutex> lock(mutex_);
     if (stopping_) {
+      return false;
+    }
+    if (json_line.size() > kMaxPendingBytes) {
+      ++dropped_;
       return false;
     }
     while (!pending_.empty() && (pending_.size() >= kMaxPendingEntries ||
@@ -92,19 +91,22 @@ void AsyncContextWriter::Run() {
 }
 
 void AsyncContextWriter::Persist(const ContextWriteTask& task) {
-  std::error_code ec;
-  std::filesystem::create_directories(path_.parent_path(), ec);
-  if (ec) {
-    std::fprintf(stderr, "vinput: failed to create context cache directory: %s\n",
-                 ec.message().c_str());
-    return;
-  }
-
   {
     std::ofstream ofs(path_, std::ios::app);
     if (!ofs) {
-      std::fprintf(stderr, "vinput: failed to open context cache for append\n");
-      return;
+      std::error_code ec;
+      std::filesystem::create_directories(path_.parent_path(), ec);
+      if (ec) {
+        std::fprintf(stderr, "vinput: failed to create context cache directory: %s\n",
+                     ec.message().c_str());
+        return;
+      }
+      ofs.clear();
+      ofs.open(path_, std::ios::app);
+      if (!ofs) {
+        std::fprintf(stderr, "vinput: failed to open context cache for append\n");
+        return;
+      }
     }
     ofs << task.json_line << '\n';
   }
@@ -143,6 +145,7 @@ void AsyncContextWriter::Persist(const ContextWriteTask& task) {
   if (!out) {
     return;
   }
+  std::error_code ec;
   std::filesystem::rename(temp_path, path_, ec);
   if (ec) {
     std::fprintf(stderr, "vinput: failed to rotate context cache: %s\n", ec.message().c_str());
