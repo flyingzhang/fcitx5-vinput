@@ -73,6 +73,9 @@ void ApplyRecognitionEvents(
     const std::optional<std::chrono::steady_clock::time_point>& recording_started_at,
     const std::optional<std::chrono::steady_clock::time_point>& first_non_silent_at,
     DbusService* dbus, std::string* latest_partial_text = nullptr) {
+  if (events.empty()) {
+    return;
+  }
   for (const auto& event : events) {
     switch (event.kind) {
     case vinput::daemon::asr::RecognitionEventKind::PartialText:
@@ -615,8 +618,10 @@ void DaemonRuntimeController::HandleIncomingAudio(std::span<const int16_t> pcm) 
         pending_chunk_pcm_.erase(pending_chunk_pcm_.begin(),
                                  pending_chunk_pcm_.begin() +
                                      static_cast<std::ptrdiff_t>(chunk_to_push.size()));
-        ApplyRecognitionEvents(events, &latest_final_text_, &first_partial_logged_,
-                               recording_started_at_, first_non_silent_at_, dbus_);
+        if (!events.empty()) {
+          ApplyRecognitionEvents(events, &latest_final_text_, &first_partial_logged_,
+                                 recording_started_at_, first_non_silent_at_, dbus_);
+        }
         keep_processing = pending_chunk_pcm_.size() >= kStreamingChunkSamples;
         if (keep_processing) {
           chunk_to_push.assign(pending_chunk_pcm_.begin(),
@@ -751,8 +756,10 @@ void DaemonRuntimeController::PollActiveSessionEvents() {
         return event.kind == vinput::daemon::asr::RecognitionEventKind::Error;
       });
     }
-    ApplyRecognitionEvents(events, &latest_final_text_, &first_partial_logged_,
-                           recording_started_at, first_non_silent_at, dbus_);
+    if (!events.empty()) {
+      ApplyRecognitionEvents(events, &latest_final_text_, &first_partial_logged_,
+                             recording_started_at, first_non_silent_at, dbus_);
+    }
   }
 
   if (failure.has_value()) {
