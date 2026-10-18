@@ -112,16 +112,6 @@ bool WriteAll(int fd, std::string_view data) {
   return true;
 }
 
-std::optional<std::string_view> FindHeader(const std::vector<HttpHeader>& headers,
-                                           std::string_view name) {
-  for (const auto& h : headers) {
-    if (vinput::str::EqualsIgnoreCase(h.name, name)) {
-      return h.value;
-    }
-  }
-  return std::nullopt;
-}
-
 bool HasHeader(const std::vector<HttpHeader>& headers, std::string_view name) {
   return FindHeader(headers, name).has_value();
 }
@@ -873,6 +863,16 @@ void HttpServer::HandleClient(const std::shared_ptr<ClientWorker>& worker) {
     if (!ParseHttpRequestHeader(buffer, &req, &body)) {
       SendErrorResponse(fd, 400, "Bad Request\n");
       return;
+    }
+
+    sockaddr sa_peer[2]{};
+    socklen_t peer_addr_len = sizeof(sa_peer);
+    if (getpeername(fd, &sa_peer[0], &peer_addr_len) == 0) {
+      char ip_buf[NI_MAXHOST] = {};
+      if (getnameinfo(&sa_peer[0], peer_addr_len, ip_buf, sizeof(ip_buf), nullptr, 0,
+                      NI_NUMERICHOST) == 0) {
+        req.client_ip = ip_buf;
+      }
     }
 
     const auto content_length_opt = ExtractContentLength(req.headers);
