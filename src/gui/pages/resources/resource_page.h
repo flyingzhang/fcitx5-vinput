@@ -8,6 +8,7 @@
 #include <QTableWidget>
 #include <QTextEdit>
 #include <QWidget>
+#include <QtCore/qpointer.h>
 #include <cstdint>
 
 #include "common/asr/model_manager.h"
@@ -23,6 +24,7 @@ class ResourcePage : public QWidget {
 
 public:
   explicit ResourcePage(QWidget* parent = nullptr);
+  ~ResourcePage() override;
 
   void reload();
 
@@ -44,7 +46,7 @@ private slots:
   void updateAdapterButtons();
   void onDownloadProgress(int percent, QString speed);
   void onDownloadError(QString msg);
-  void onDownloadFinished();
+  void onDownloadFinished(DownloadWorker* originating_worker = nullptr);
 
 private:
   void populateLocalModels(const std::vector<ModelSummary>& models);
@@ -79,7 +81,7 @@ private:
   QPushButton* btnUpdateAdapter_;
   QPushButton* btnRemoveAdapter_;
   QPushButton* btnRefreshResources_;
-  DownloadWorker* downloadWorker_ = nullptr;
+  QPointer<DownloadWorker> downloadWorker_;
   std::vector<RemoteModelEntry> remoteModels_;
   std::vector<vinput::script::RegistryEntry> remoteProviders_;
   std::vector<vinput::script::RegistryEntry> remoteAdapters_;
