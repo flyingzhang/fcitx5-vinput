@@ -1,5 +1,7 @@
 #include <arpa/inet.h>
+#include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -10,6 +12,7 @@
 #include <sys/poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -136,6 +139,7 @@ void TestRemoteAssets() {
   TEST_ASSERT(!html.empty());
   TEST_ASSERT(html.find("<!doctype html>") != std::string::npos);
   TEST_ASSERT(html.find("VInput Remote") != std::string::npos);
+  TEST_ASSERT(html.find("enterkeyhint=\"send\"") != std::string::npos);
 
   const std::string svg = vinput::daemon::remote::LoadRemoteFaviconSvg();
   TEST_ASSERT(!svg.empty());
@@ -296,11 +300,98 @@ void TestRemoteTextServiceHttpAndWs() {
   service.Shutdown();
 }
 
+void TestPhoneDrivenDirectSession() {
+  const std::uint16_t port = FindFreePort();
+  const std::string api_key = "direct_phone_key_456";
+
+  CoreConfig config;
+  config.asr.activeProvider = "provider.vinput.remote.streaming";
+  CommandAsrProvider cmd;
+  cmd.id = "provider.vinput.remote.streaming";
+  cmd.env["VINPUT_ASR_PORT"] = std::to_string(port);
+  cmd.env["VINPUT_ASR_API_KEY"] = api_key;
+  cmd.env["VINPUT_ASR_DEBOUNCE_MS"] = "200";
+  config.asr.providers.emplace_back(cmd);
+
+  vinput::daemon::remote::RemoteTextService service;
+  std::atomic<bool> start_called{false};
+  std::atomic<bool> stop_called{false};
+  service.SetSessionControlCallbacks(
+      [&start_called]() {
+        start_called.store(true);
+        return true;
+      },
+      [&stop_called](const std::string&) {
+        stop_called.store(true);
+        return true;
+      });
+
+  std::string err;
+  TEST_ASSERT(service.Synchronize(config, &err));
+  TEST_ASSERT(err.empty());
+
+  const int ws_fd = ConnectToPort(port);
+  TEST_ASSERT(ws_fd >= 0);
+  std::string ws_buf;
+  const std::string req = "GET /ws HTTP/1.1\r\n"
+                          "Host: 127.0.0.1\r\n"
+                          "Upgrade: websocket\r\n"
+                          "Connection: Upgrade\r\n"
+                          "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                          "Sec-WebSocket-Version: 13\r\n\r\n";
+  TEST_ASSERT(SendRaw(ws_fd, req));
+  const std::string resp = RecvUntil(ws_fd, "\r\n\r\n");
+  TEST_ASSERT(resp.find("HTTP/1.1 101 Switching Protocols") != std::string::npos);
+
+  // Authenticate
+  const std::uint8_t mask[4] = {0xAA, 0xBB, 0xCC, 0xDD};
+  const std::string auth_json = std::string(R"({"type":"auth","api_key":")") + api_key + R"("})";
+  TEST_ASSERT(SendRaw(ws_fd, vinput::net::EncodeWebSocketFrame(vinput::net::WsOpcode::kText,
+                                                               auth_json, true, mask)));
+
+  vinput::net::WsFrame frame1;
+  TEST_ASSERT(RecvFrame(ws_fd, &ws_buf, &frame1));
+  TEST_ASSERT(frame1.payload.find("auth_ok") != std::string::npos);
+
+  vinput::net::WsFrame frame2;
+  TEST_ASSERT(RecvFrame(ws_fd, &ws_buf, &frame2));
+  TEST_ASSERT(frame2.payload.find("init") != std::string::npos);
+
+  auto wait_for = [](const std::atomic<bool>& flag, int timeout_ms = 3000) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (!flag.load() && std::chrono::steady_clock::now() < deadline) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return flag.load();
+  };
+
+  // 1. Phone sends text -> should trigger start_called!
+  const std::string update_json = R"({"type":"text_update","text":"Mobile speaks"})";
+  TEST_ASSERT(SendRaw(ws_fd, vinput::net::EncodeWebSocketFrame(vinput::net::WsOpcode::kText,
+                                                               update_json, true, mask)));
+  TEST_ASSERT(wait_for(start_called));
+
+  // 2. Phone sends finalize -> should trigger stop_called and receive committed!
+  const std::string finalize_json = R"({"type":"finalize"})";
+  TEST_ASSERT(SendRaw(ws_fd, vinput::net::EncodeWebSocketFrame(vinput::net::WsOpcode::kText,
+                                                               finalize_json, true, mask)));
+  TEST_ASSERT(wait_for(stop_called));
+
+  vinput::net::WsFrame frame3;
+  TEST_ASSERT(RecvFrame(ws_fd, &ws_buf, &frame3));
+  TEST_ASSERT(frame3.payload.find("committed") != std::string::npos);
+  TEST_ASSERT(service.GetText().empty());
+
+  close(ws_fd);
+  service.Shutdown();
+}
+
 } // namespace
 
 int main() {
   TestRemoteAssets();
   TestRemoteTextServiceHttpAndWs();
+  TestPhoneDrivenDirectSession();
   std::puts("All remote text service tests passed!");
   return 0;
 }

@@ -228,6 +228,36 @@ bool RemoteTextService::Synchronize(const CoreConfig& config, std::string* error
   return Start(next_settings, error);
 }
 
+void RemoteTextService::SetSessionControlCallbacks(StartCallback on_start, StopCallback on_stop) {
+  const std::lock_guard<std::mutex> lock(callback_mutex_);
+  on_start_ = std::move(on_start);
+  on_stop_ = std::move(on_stop);
+}
+
+void RemoteTextService::MaybeTriggerStart() {
+  StartCallback cb;
+  {
+    const std::lock_guard<std::mutex> lock(callback_mutex_);
+    cb = on_start_;
+  }
+  if (!cb) {
+    return;
+  }
+  bool needs_start = false;
+  {
+    const std::lock_guard<std::mutex> lock(state_mutex_);
+    if (!output_session_ || !output_session_->IsOpen()) {
+      needs_start = true;
+    }
+  }
+  if (needs_start) {
+    bool expected = false;
+    if (start_in_progress_.compare_exchange_strong(expected, true)) {
+      cb();
+    }
+  }
+}
+
 std::vector<std::string> RemoteTextService::ListEndpoints() const {
   const std::lock_guard<std::mutex> lock(lifecycle_mutex_);
   if (!service_started_) {
@@ -366,6 +396,7 @@ bool RemoteTextService::Start(const Settings& settings, std::string* error) {
 
 void RemoteTextService::Shutdown() {
   const bool was_running = running_.exchange(false, std::memory_order_acq_rel);
+  start_in_progress_.store(false, std::memory_order_release);
   {
     const std::lock_guard<std::mutex> lock(debounce_mutex_);
     debounce_stop_ = true;
@@ -556,7 +587,11 @@ void RemoteTextService::HandleInputSession(
 
     const std::string type = event.value("type", std::string{});
     if (type == "text_update") {
-      SetText(event.value("text", std::string{}));
+      const std::string text = event.value("text", std::string{});
+      SetText(text);
+      if (!text.empty()) {
+        MaybeTriggerStart();
+      }
       ScheduleDebounce();
     } else if (type == "finalize") {
       ForceDebounce();
@@ -671,38 +706,59 @@ void RemoteTextService::SendEmptyCommit(
 }
 
 void RemoteTextService::SendFinalResult() {
+  start_in_progress_.store(false, std::memory_order_release);
+
   std::shared_ptr<vinput::net::WebSocketSession> session;
   {
     const std::lock_guard<std::mutex> lock(state_mutex_);
     session = output_session_;
   }
-  if (!session || !session->IsOpen()) {
-    return;
-  }
 
   const std::string text = GetText();
   if (text.empty()) {
+    NotifyInput("committed");
+    StopCallback stop_cb;
+    {
+      const std::lock_guard<std::mutex> lock(callback_mutex_);
+      stop_cb = on_stop_;
+    }
+    if (stop_cb) {
+      stop_cb("");
+    }
     return;
   }
 
-  const std::string item_id = NewEventId("item");
-  session->SendJson(json{
-      {"event_id", NewEventId("event")},
-      {"type", "input_audio_buffer.committed"},
-      {"item_id",
-       item_id}}.dump());
-  session->SendJson(json{
-      {"event_id", NewEventId("event")},
-      {"type", "conversation.item.input_audio_transcription.delta"},
-      {"item_id", item_id},
-      {"delta", text}}.dump());
-  session->SendJson(json{
-      {"event_id", NewEventId("event")},
-      {"type", "conversation.item.input_audio_transcription.completed"},
-      {"item_id", item_id},
-      {"transcript",
-       text}}.dump());
+  if (session && session->IsOpen()) {
+    const std::string item_id = NewEventId("item");
+    session->SendJson(json{
+        {"event_id", NewEventId("event")},
+        {"type", "input_audio_buffer.committed"},
+        {"item_id",
+         item_id}}.dump());
+    session->SendJson(json{
+        {"event_id", NewEventId("event")},
+        {"type", "conversation.item.input_audio_transcription.delta"},
+        {"item_id", item_id},
+        {"delta", text}}.dump());
+    session->SendJson(json{
+        {"event_id", NewEventId("event")},
+        {"type", "conversation.item.input_audio_transcription.completed"},
+        {"item_id", item_id},
+        {"transcript",
+         text}}.dump());
+  }
+
   ClearText();
+  NotifyInput("committed");
+
+  StopCallback stop_cb;
+  {
+    const std::lock_guard<std::mutex> lock(callback_mutex_);
+    stop_cb = on_stop_;
+  }
+  if (stop_cb) {
+    stop_cb("");
+  }
 }
 
 } // namespace vinput::daemon::remote
