@@ -1,249 +1,171 @@
 #include "common/utils/downloader.h"
 
-#include <chrono>
-#include <curl/curl.h>
-#include <fstream>
+#include <atomic>
+#include <cstddef>
+#include <filesystem>
+#include <limits>
 #include <string>
+#include <system_error>
+#include <utility>
+#include <vector>
 
-#include "common/utils/file_utils.h"
+#include "common/net/http_client.h"
+#include "common/net/http_types.h"
 
 namespace vinput::download {
 
 namespace {
 
-struct MemoryBuffer {
-  std::string data;
-  size_t max_size = 0;
-};
-
-struct FileWriter {
-  std::ofstream* out = nullptr;
-};
-
-struct ProgressState {
-  ProgressCallback cb;
-  uint64_t last_downloaded_bytes = 0;
-  std::chrono::steady_clock::time_point last_update_time{};
-  bool has_last_update = false;
-};
-
-size_t WriteToMemory(char* ptr, size_t size, size_t nmemb, void* userdata) {
-  auto* buf = static_cast<MemoryBuffer*>(userdata);
-  const size_t total = size * nmemb;
-  if (buf->max_size > 0 && buf->data.size() + total > buf->max_size) {
-    return 0;
+vinput::net::ProgressCallback MakeProgressCallback(const ProgressCallback& cb) {
+  if (cb == nullptr) {
+    return nullptr;
   }
-  buf->data.append(ptr, total);
-  return total;
+  return [cb](const vinput::net::HttpProgress& hp) {
+    Progress p;
+    p.downloaded_bytes = hp.downloaded_bytes;
+    p.total_bytes = hp.total_bytes;
+    p.speed_bps = hp.speed_bps;
+    cb(p);
+  };
 }
 
-size_t WriteToFile(char* ptr, size_t size, size_t nmemb, void* userdata) {
-  auto* writer = static_cast<FileWriter*>(userdata);
-  const size_t total = size * nmemb;
-  writer->out->write(ptr, static_cast<std::streamsize>(total));
-  if (!writer->out->good()) {
-    return 0;
-  }
-  return total;
-}
-
-int ProgressCallbackFn(void* userdata, curl_off_t dltotal, curl_off_t dlnow, curl_off_t /*ultotal*/,
-                       curl_off_t /*ulnow*/) {
-  auto* state = static_cast<ProgressState*>(userdata);
-  if (!state->cb) {
-    return 0;
-  }
-
-  const uint64_t downloaded_bytes = static_cast<uint64_t>(dlnow);
-  const auto now = std::chrono::steady_clock::now();
-  Progress progress;
-  progress.downloaded_bytes = downloaded_bytes;
-  progress.total_bytes = static_cast<uint64_t>(dltotal > 0 ? dltotal : 0);
-  if (state->has_last_update) {
-    const auto elapsed = now - state->last_update_time;
-    const double elapsed_seconds = std::chrono::duration<double>(elapsed).count();
-    if (elapsed_seconds > 0 && downloaded_bytes >= state->last_downloaded_bytes) {
-      progress.speed_bps = (downloaded_bytes - state->last_downloaded_bytes) / elapsed_seconds;
-    }
-  }
-  state->last_downloaded_bytes = downloaded_bytes;
-  state->last_update_time = now;
-  state->has_last_update = true;
-  state->cb(progress);
-  return 0;
+vinput::net::HttpRequest MakeRequest(const std::string& url, const Options& options) {
+  vinput::net::HttpRequest req;
+  req.url = url;
+  req.method = vinput::net::HttpMethod::Get;
+  req.timeout_ms = options.timeout_seconds * 1000;
+  req.connect_timeout_ms = options.timeout_seconds * 1000;
+  req.follow_redirects = options.follow_redirects;
+  req.cancel_token = options.cancel_token;
+  req.progress_cb = MakeProgressCallback(options.progress_cb);
+  req.proxy = options.proxy;
+  return req;
 }
 
 bool RequiresHttpStatusCheck(const std::string& url) {
-  return url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0;
+  return url.starts_with("http://") || url.starts_with("https://");
 }
 
-bool FinalizeResult(const std::string& attempt_url, CURL* curl, CURLcode code,
-                    size_t bytes_received, Result* result) {
-  Result local;
-  local.bytes_received = bytes_received;
-  local.resolved_url = attempt_url;
-
-  char* effective_url = nullptr;
-  curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &effective_url);
-  if (effective_url && *effective_url) {
-    local.resolved_url = effective_url;
+void PopulateResult(const std::string& url, const vinput::net::HttpResponse& res, Result* result) {
+  if (result == nullptr) {
+    return;
   }
+  result->resolved_url = res.effective_url.empty() ? url : res.effective_url;
+  result->http_code = res.status_code;
 
-  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &local.http_code);
+  const bool http_ok = RequiresHttpStatusCheck(url) ? (res.status_code == 200) : true;
+  result->ok = res.Ok() && http_ok;
 
-  if (code != CURLE_OK) {
-    local.error = std::string("download failed: ") + curl_easy_strerror(code);
-    if (result) {
-      *result = std::move(local);
-    }
-    return false;
+  if (result->ok) {
+    result->error.clear();
+  } else if (res.cancelled) {
+    result->error = "download cancelled";
+  } else if (!res.error_message.empty()) {
+    result->error = "download failed: " + res.error_message;
+  } else if (RequiresHttpStatusCheck(url) && res.status_code != 200 && res.status_code != 0) {
+    result->error = "download failed with HTTP " + std::to_string(res.status_code);
+  } else {
+    result->error = "download failed";
   }
-
-  if (RequiresHttpStatusCheck(local.resolved_url) && local.http_code != 200) {
-    local.error = "download failed with HTTP " + std::to_string(local.http_code);
-    if (result) {
-      *result = std::move(local);
-    }
-    return false;
-  }
-
-  local.ok = true;
-  if (result) {
-    *result = std::move(local);
-  }
-  return true;
 }
 
-template <typename PrepareFn, typename CleanupFn>
-bool DownloadWithFallback(const std::vector<std::string>& urls, const Options& options,
-                          PrepareFn prepare, CleanupFn cleanup, Result* result) {
-  Result last_result;
-  for (const auto& url : urls) {
-    if (url.empty()) {
-      continue;
-    }
-
-    CURL* curl = curl_easy_init();
-    if (!curl) {
-      last_result.error = "failed to initialize libcurl";
-      continue;
-    }
-
-    ProgressState progress_state{options.progress_cb};
-    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, options.follow_redirects ? 1L : 0L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, options.timeout_seconds);
-    curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
-    curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, ProgressCallbackFn);
-    curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &progress_state);
-
-    size_t bytes_received = 0;
-    if (!prepare(curl, &bytes_received, &last_result)) {
-      curl_easy_cleanup(curl);
-      cleanup();
-      continue;
-    }
-
-    CURLcode code = curl_easy_perform(curl);
-    const bool ok = FinalizeResult(url, curl, code, bytes_received, &last_result);
-    curl_easy_cleanup(curl);
-    if (ok) {
-      if (result) {
-        *result = last_result;
-      }
-      return true;
-    }
-
-    cleanup();
-  }
-
-  if (result) {
-    *result = std::move(last_result);
-  }
-  return false;
+bool IsCancelled(const Options& options, const vinput::net::HttpResponse& res) {
+  return res.cancelled ||
+         (options.cancel_token != nullptr && options.cancel_token->load(std::memory_order_relaxed));
 }
 
 } // namespace
 
 bool DownloadText(const std::vector<std::string>& urls, const Options& options,
                   std::string* content, Result* result) {
-  if (content) {
+  if (content != nullptr) {
     content->clear();
   }
 
-  MemoryBuffer buffer;
-  buffer.max_size = options.max_bytes;
-  const bool ok = DownloadWithFallback(
-      urls, options,
-      [&buffer](CURL* curl, size_t* bytes_received, Result* result_state) {
-        buffer.data.clear();
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteToMemory);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
-        *bytes_received = 0;
-        if (result_state) {
-          result_state->error.clear();
-        }
-        return true;
-      },
-      []() {}, result);
+  Result last_result;
+  for (const auto& url : urls) {
+    if (options.cancel_token != nullptr && options.cancel_token->load(std::memory_order_relaxed)) {
+      last_result.ok = false;
+      last_result.resolved_url = url;
+      last_result.error = "download cancelled";
+      break;
+    }
+    if (url.empty()) {
+      continue;
+    }
 
-  if (!ok) {
-    return false;
+    auto req = MakeRequest(url, options);
+    req.max_response_bytes =
+        options.max_bytes > 0 ? options.max_bytes : std::numeric_limits<size_t>::max();
+
+    auto res = vinput::net::HttpClient::Instance().Request(req);
+    PopulateResult(url, res, &last_result);
+    last_result.bytes_received = res.body.size();
+
+    if (last_result.ok) {
+      if (content != nullptr) {
+        *content = std::move(res.body);
+      }
+      if (result != nullptr) {
+        *result = std::move(last_result);
+      }
+      return true;
+    }
+
+    if (IsCancelled(options, res)) {
+      break;
+    }
   }
 
-  if (content) {
-    *content = std::move(buffer.data);
+  if (result != nullptr) {
+    *result = std::move(last_result);
   }
-  if (result) {
-    result->bytes_received = content ? content->size() : buffer.data.size();
-  }
-  return true;
+  return false;
 }
 
 bool DownloadFile(const std::vector<std::string>& urls, const std::filesystem::path& dest,
                   const Options& options, Result* result) {
-  std::ofstream out;
-  FileWriter writer;
-
-  const auto cleanup = [&]() {
-    if (out.is_open()) {
-      out.close();
+  Result last_result;
+  for (const auto& url : urls) {
+    if (options.cancel_token != nullptr && options.cancel_token->load(std::memory_order_relaxed)) {
+      last_result.ok = false;
+      last_result.resolved_url = url;
+      last_result.error = "download cancelled";
+      break;
     }
-    std::error_code ec;
-    std::filesystem::remove(dest, ec);
-  };
+    if (url.empty()) {
+      continue;
+    }
 
-  const bool ok = DownloadWithFallback(
-      urls, options,
-      [&](CURL* curl, size_t* bytes_received, Result* result_state) {
-        cleanup();
-        std::string err;
-        if (!vinput::file::EnsureParentDirectory(dest, &err)) {
-          if (result_state) {
-            result_state->error = err;
-          }
-          return false;
-        }
-        out.open(dest, std::ios::binary | std::ios::trunc);
-        if (!out.is_open()) {
-          if (result_state) {
-            result_state->error = "failed to open destination file: " + dest.string();
-          }
-          return false;
-        }
-        writer.out = &out;
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteToFile);
-        curl_easy_setopt(curl, CURLOPT_WRITEDATA, &writer);
-        *bytes_received = 0;
-        return true;
-      },
-      cleanup, result);
+    const auto req = MakeRequest(url, options);
+    auto res = vinput::net::HttpClient::Instance().DownloadToFile(req, dest);
+    PopulateResult(url, res, &last_result);
 
-  if (out.is_open()) {
-    out.close();
+    if (last_result.ok) {
+      std::error_code ec;
+      const auto sz = std::filesystem::file_size(dest, ec);
+      last_result.bytes_received = ec ? 0 : sz;
+      if (result != nullptr) {
+        *result = std::move(last_result);
+      }
+      return true;
+    }
+
+    last_result.bytes_received = 0;
+    if (IsCancelled(options, res)) {
+      break;
+    }
   }
 
-  return ok;
+  const bool success = last_result.ok;
+  if (result != nullptr) {
+    *result = std::move(last_result);
+  }
+  if (!success) {
+    std::error_code ec;
+    std::filesystem::remove(dest, ec);
+  }
+  return false;
 }
 
 } // namespace vinput::download
