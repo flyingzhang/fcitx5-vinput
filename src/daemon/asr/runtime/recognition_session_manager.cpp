@@ -20,14 +20,26 @@ public:
                         std::unique_ptr<RecognitionSession> session)
       : backend_(std::move(backend)), session_(std::move(session)) {}
 
+  using RecognitionSession::PushAudio;
+
   bool PushAudio(std::span<const int16_t> pcm, std::string* error) override {
     if (!session_) {
-      if (error) {
+      if (error != nullptr) {
         *error = "Recognition session is not initialized.";
       }
       return false;
     }
     return session_->PushAudio(pcm, error);
+  }
+
+  bool PushAudio(std::span<const float> samples, std::string* error) override {
+    if (!session_) {
+      if (error != nullptr) {
+        *error = "Recognition session is not initialized.";
+      }
+      return false;
+    }
+    return session_->PushAudio(samples, error);
   }
 
   bool Finish(std::string* error) override {

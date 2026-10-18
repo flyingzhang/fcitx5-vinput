@@ -6,6 +6,8 @@
 #include <cstdlib>
 #include <mutex>
 #include <sherpa-onnx/c-api/c-api.h>
+#include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -36,42 +38,48 @@ public:
 
   ~SherpaStreamingSession() override { Reset(); }
 
-  bool PushAudio(std::span<const int16_t> pcm, std::string* error) override {
+  using RecognitionSession::PushAudio;
+
+  bool PushAudio(std::span<const float> samples, std::string* error) override {
     if (finished_) {
-      if (error) {
+      if (error != nullptr) {
         *error = "Recognition session already finished.";
       }
       return false;
     }
 
     if (!recognizer_ || !stream_) {
-      if (error) {
+      if (error != nullptr) {
         *error = "Streaming recognizer is not initialized.";
       }
       return false;
     }
 
-    if (pcm.empty()) {
-      if (error) {
+    if (samples.empty()) {
+      if (error != nullptr) {
         error->clear();
       }
       return true;
     }
 
-    std::vector<float> samples(pcm.size());
-    for (std::size_t i = 0; i < pcm.size(); ++i) {
-      samples[i] = static_cast<float>(pcm[i]) / 32768.0f;
-    }
     UpdateAudioStats(samples);
 
     SherpaOnnxOnlineStreamAcceptWaveform(stream_, 16000, samples.data(),
                                          static_cast<int32_t>(samples.size()));
     DecodeAvailable();
 
-    if (error) {
+    if (error != nullptr) {
       error->clear();
     }
     return true;
+  }
+
+  bool PushAudio(std::span<const int16_t> pcm, std::string* error) override {
+    std::vector<float> samples(pcm.size());
+    for (std::size_t i = 0; i < pcm.size(); ++i) {
+      samples[i] = static_cast<float>(pcm[i]) / 32768.0F;
+    }
+    return PushAudio(std::span<const float>(samples), error);
   }
 
   bool Finish(std::string* error) override {

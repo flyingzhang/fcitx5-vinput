@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -340,6 +341,36 @@ void TestDeferredReleaseDoesNotJoinOnReleasingThread() {
   Expect(state->finish_calls == 0, "backend Finish not called after Cancel");
 }
 
+void TestPushAudioFloatFallback() {
+  auto state = MakeState(true);
+  AsyncRecognitionSession session(std::make_unique<FakeSession>(state), 1024);
+  std::string error;
+  const std::vector<float> float_samples = {0.0F, 1.0F, -1.0F, 0.5F,
+                                            std::numeric_limits<float>::quiet_NaN()};
+  Expect(session.PushAudio(float_samples, &error), "push float audio succeeded");
+  Expect(error.empty(), "push float audio has no error");
+  Expect(session.Finish(&error), "session finish succeeded");
+  {
+    const std::scoped_lock lock(state->mutex);
+    const std::vector<int16_t> expected = {0, 32767, -32768, 16384, 0};
+    Expect(state->received == expected,
+           "float samples accurately converted to int16 by default fallback with NaN mapped to 0");
+  }
+
+  const std::vector<float> empty_samples;
+  Expect(!session.PushAudio(empty_samples, &error),
+         "push empty float audio after finish must fail");
+}
+
+void TestPushAudioFloatEmpty() {
+  auto state = MakeState(true);
+  AsyncRecognitionSession session(std::make_unique<FakeSession>(state), 1024);
+  std::string error;
+  const std::vector<float> empty_samples;
+  Expect(session.PushAudio(empty_samples, &error), "push empty float audio succeeded");
+  Expect(error.empty(), "push empty float audio has no error");
+}
+
 } // namespace
 
 int main() {
@@ -352,5 +383,7 @@ int main() {
   TestCancelClearsQueueAndCompletesOnce();
   TestDestructorCancelsAndJoinsPromptly();
   TestDeferredReleaseDoesNotJoinOnReleasingThread();
+  TestPushAudioFloatFallback();
+  TestPushAudioFloatEmpty();
   std::cout << "Async recognition session tests passed\n";
 }
