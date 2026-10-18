@@ -39,6 +39,26 @@ include("${FCITX_INSTALL_CMAKECONFIG_DIR}/Fcitx5Utils/Fcitx5CompilerSettings.cma
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
+
+add_compile_options(-ffunction-sections -fdata-sections)
+add_link_options(-Wl,--gc-sections -Wl,--as-needed)
+
+include(CheckIPOSupported)
+check_ipo_supported(RESULT ipo_supported OUTPUT ipo_error)
+if(ipo_supported)
+    if(NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION AND NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+    endif()
+    if(NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION AND NOT DEFINED CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+    endif()
+    message(STATUS "Interprocedural Optimization (LTO) enabled for Release builds")
+else()
+    message(STATUS "Interprocedural Optimization (LTO) not supported: ${ipo_error}")
+endif()
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     add_compile_options(
         -Wall
