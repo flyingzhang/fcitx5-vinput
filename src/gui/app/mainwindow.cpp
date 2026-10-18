@@ -2,21 +2,21 @@
 
 #include <QClipboard>
 #include <QDesktopServices>
-#include <QFile>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLocale>
 #include <QMessageBox>
 #include <QPushButton>
-#include <QTextStream>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QtGui/qclipboard.h>
 #include <QtGui/qguiapplication.h>
+#include <QtWidgets/qmessagebox.h>
 #include <fstream>
 #include <nlohmann/json.hpp>
 
 #include "common/utils/downloader.h"
+#include "common/utils/file_utils.h"
 #include "common/utils/locale_utils.h"
 #include "common/utils/path_utils.h"
 
@@ -126,9 +126,12 @@ void MainWindow::onSaveClicked() {
   }
   if (!hotwordsFile.isEmpty()) {
     // Write hotwords content to file
-    QFile f(hotwordsFile);
-    if (f.open(QIODevice::WriteOnly | QIODevice::Text)) {
-      QTextStream(&f) << hotwordPage_->hotwordsContent();
+    std::string write_err;
+    if (!vinput::file::AtomicWriteTextFile(hotwordsFile.toStdString(),
+                                           hotwordPage_->hotwordsContent().toStdString(),
+                                           &write_err)) {
+      QMessageBox::critical(this, tr("Error"), tr("Failed to save hotwords file."));
+      return;
     }
   }
 #endif
@@ -253,10 +256,5 @@ void MainWindow::onNotificationReady(QString id, QString title, QString text, QS
 
   // Mark as read
   const auto read_path = vinput::path::ReadNotificationsPath();
-  std::error_code ec;
-  std::filesystem::create_directories(read_path.parent_path(), ec);
-  std::ofstream ofs(read_path, std::ios::trunc);
-  if (ofs) {
-    ofs << id.toStdString();
-  }
+  vinput::file::AtomicWriteTextFile(read_path, id.toStdString(), nullptr);
 }
