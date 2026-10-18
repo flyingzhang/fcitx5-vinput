@@ -22,9 +22,6 @@ set(VINPUT_GUI_SOURCES
     pages/control/control_page.cpp
     pages/resources/resource_page.cpp
     pages/llm/llm_page.cpp
-    ${CMAKE_SOURCE_DIR}/src/common/audio/pipewire_device.cpp
-    ${CMAKE_SOURCE_DIR}/src/cli/runtime/dbus_client.cpp
-    ${CMAKE_SOURCE_DIR}/src/cli/runtime/systemd_client.cpp
 )
 
 set(VINPUT_GUI_HEADERS
@@ -104,6 +101,8 @@ target_link_libraries(gui
     Qt6::Widgets
     Qt6::Network
     common
+    pipewire_device
+    client_runtime
     ${PIPEWIRE_LIBRARIES}
     ${SDBUS_LIBRARIES}
 )
