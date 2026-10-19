@@ -554,21 +554,37 @@ void RemoteTextService::HandleInputSession(
         return;
       }
 
-      bool duplicate_client = false;
+      std::shared_ptr<vinput::net::WebSocketSession> old_session;
       {
         const std::lock_guard<std::mutex> lock(state_mutex_);
-        if (input_session_ && input_session_->IsOpen() && input_session_ != current_session) {
-          duplicate_client = true;
-        } else {
-          input_session_ = current_session;
+        if (input_session_ && input_session_ != current_session) {
+          old_session = input_session_;
         }
+        input_session_ = current_session;
       }
 
-      if (duplicate_client) {
-        current_session->SendJson(
-            json{{"type", "busy"}, {"message", "Input client already connected."}}.dump());
-        current_session->Close(1008, "Input client already connected.");
-        return;
+      if (old_session) {
+        CancelDebounce();
+        ClearText();
+        if (start_in_progress_.load()) {
+          StopCallback stop_cb;
+          {
+            const std::lock_guard<std::mutex> lock(callback_mutex_);
+            stop_cb = on_stop_;
+          }
+          if (stop_cb) {
+            (void)stop_cb("");
+          }
+          start_in_progress_.store(false);
+        }
+        std::thread([old_session]() {
+          if (old_session->IsOpen()) {
+            old_session->SendJson(
+                json{{"type", "displaced"}, {"message", "Replaced by new authenticated session."}}
+                    .dump());
+            old_session->Close(1000, "Replaced by new authenticated session.");
+          }
+        }).detach();
       }
 
       current_session->SendJson(json{{"type", "auth_ok"}}.dump());
@@ -583,6 +599,13 @@ void RemoteTextService::HandleInputSession(
       }
       current_session->SendJson(json{{"type", "init"}, {"output_status", output_status}}.dump());
       return;
+    }
+
+    {
+      const std::lock_guard<std::mutex> lock(state_mutex_);
+      if (input_session_ != current_session) {
+        return;
+      }
     }
 
     const std::string type = event.value("type", std::string{});
