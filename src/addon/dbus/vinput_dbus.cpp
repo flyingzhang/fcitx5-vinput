@@ -665,9 +665,8 @@ std::string VinputEngine::queryDaemonStatus() const {
   auto msg = bus_->createMethodCall(kBusName, kObjectPath, kInterface, kMethodGetStatus);
   auto reply = msg.call(vinput::runtime::kDbusCallTimeoutUsec);
   if (!reply || reply.isError()) {
-    vinput::debug::Log("daemon status query failed reply=%s error=%s\n",
-                       reply ? reply.errorName().c_str() : "(null)",
-                       reply ? reply.errorMessage().c_str() : "(no reply)");
+    VLOG_DEBUG("daemon status query failed reply={} error={}", reply ? reply.errorName() : "(null)",
+               reply ? reply.errorMessage() : "(no reply)");
     const_cast<VinputEngine*>(this)->noteDaemonSyncFailure();
     return {};
   }
@@ -691,7 +690,7 @@ bool VinputEngine::callReloadAsrBackend(std::string* error) {
   auto msg = bus_->createMethodCall(kBusName, kObjectPath, kInterface, kMethodReloadAsrBackend);
   auto reply = msg.call(vinput::runtime::kDbusCallTimeoutUsec);
   if (!reply) {
-    vinput::debug::Log("ASR backend reload RPC failed: no reply\n");
+    VLOG_DEBUG("ASR backend reload RPC failed: no reply");
     noteDaemonSyncFailure();
     if (error) {
       *error = _("Failed to contact vinput-daemon.");
@@ -700,8 +699,8 @@ bool VinputEngine::callReloadAsrBackend(std::string* error) {
   }
 
   if (reply.isError()) {
-    vinput::debug::Log("ASR backend reload RPC failed reply=%s error=%s\n",
-                       reply.errorName().c_str(), reply.errorMessage().c_str());
+    VLOG_DEBUG("ASR backend reload RPC failed reply={} error={}", reply.errorName(),
+               reply.errorMessage());
     noteDaemonSyncFailure();
     if (error) {
       *error = reply.errorMessage();
@@ -798,10 +797,10 @@ bool VinputEngine::daemonSyncAllowed() const {
 void VinputEngine::noteDaemonSyncFailure() {
   daemon_sync_blocked_until_ =
       std::chrono::steady_clock::now() + vinput::runtime::kDaemonFailureCooldown;
-  vinput::debug::Log("daemon sync temporarily throttled for %lld ms\n",
-                     static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                vinput::runtime::kDaemonFailureCooldown)
-                                                .count()));
+  VLOG_DEBUG(
+      "daemon sync temporarily throttled for {} ms",
+      std::chrono::duration_cast<std::chrono::milliseconds>(vinput::runtime::kDaemonFailureCooldown)
+          .count());
 }
 
 void VinputEngine::clearDaemonSyncFailure() {

@@ -4,6 +4,8 @@
 #include <cstdio>
 #include <utility>
 
+#include "common/config/core_config.h"
+#include "common/config/core_config_types.h"
 #include "common/i18n.h"
 #include "common/utils/debug_log.h"
 #include "common/utils/time_utils.h"
@@ -70,14 +72,7 @@ private:
   std::unique_ptr<RecognitionSession> session_;
 };
 
-bool ShouldDisableAsr(const CoreConfig& config, bool disable_asr_by_flag, std::string* reason) {
-  if (disable_asr_by_flag) {
-    if (reason) {
-      *reason = _("ASR disabled by command line.");
-    }
-    return true;
-  }
-
+bool ShouldDisableAsr(const CoreConfig& config, std::string* reason) {
   const AsrProvider* provider = ResolveActiveAsrProvider(config);
   if (!provider) {
     if (reason) {
@@ -121,18 +116,17 @@ void LogActiveBackend(const CoreConfig& config) {
   BackendDescriptor descriptor;
   std::string error;
   if (!DescribeActiveBackend(config, &descriptor, &error)) {
-    vinput::debug::Log("ASR provider=(missing)\n");
+    VLOG_DEBUG("ASR provider=(missing)");
     return;
   }
 
-  vinput::debug::Log("ASR provider=%s type=%s backend=%s\n", descriptor.provider_id.c_str(),
-                     descriptor.provider_type.c_str(), descriptor.backend_id.c_str());
+  VLOG_DEBUG("ASR provider={} type={} backend={}", descriptor.provider_id, descriptor.provider_type,
+             descriptor.backend_id);
 }
 
 } // namespace
 
-RecognitionSessionManager::RecognitionSessionManager(bool disable_asr_by_flag)
-    : disable_asr_by_flag_(disable_asr_by_flag) {}
+RecognitionSessionManager::RecognitionSessionManager() = default;
 
 RecognitionSessionManager::~RecognitionSessionManager() {
   Shutdown();
@@ -141,7 +135,7 @@ RecognitionSessionManager::~RecognitionSessionManager() {
 bool RecognitionSessionManager::Initialize(const CoreConfig& settings,
                                            std::string* disabled_reason) {
   std::string disabled_state_reason;
-  if (ShouldDisableAsr(settings, disable_asr_by_flag_, &disabled_state_reason)) {
+  if (ShouldDisableAsr(settings, &disabled_state_reason)) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     ApplyDisabledStateLocked();
     if (disabled_reason) {
@@ -181,7 +175,7 @@ bool RecognitionSessionManager::Initialize(const CoreConfig& settings,
 
 bool RecognitionSessionManager::SynchronizeBackend(const CoreConfig& settings, std::string* error) {
   std::string disabled_reason;
-  if (ShouldDisableAsr(settings, disable_asr_by_flag_, &disabled_reason)) {
+  if (ShouldDisableAsr(settings, &disabled_reason)) {
     std::lock_guard<std::mutex> lock(state_mutex_);
     ApplyDisabledStateLocked();
     if (error) {
@@ -214,10 +208,9 @@ bool RecognitionSessionManager::SynchronizeBackend(const CoreConfig& settings, s
     target_backend_signature_ = signature;
     reload_requested_ = true;
     last_reload_error_.clear();
-    vinput::debug::Log("queue ASR backend reload provider=%s model=%s signature=%s\n",
-                       target_provider_id_.empty() ? "(none)" : target_provider_id_.c_str(),
-                       target_model_id_.empty() ? "(none)" : target_model_id_.c_str(),
-                       target_backend_signature_.c_str());
+    VLOG_DEBUG("queue ASR backend reload provider={} model={} signature={}",
+               target_provider_id_.empty() ? "(none)" : target_provider_id_,
+               target_model_id_.empty() ? "(none)" : target_model_id_, target_backend_signature_);
   }
 
   reload_cv_.notify_one();
@@ -366,8 +359,7 @@ bool RecognitionSessionManager::CreatePreparedBackend(const CoreConfig& settings
   }
   warmup_session->Cancel();
   const auto prepare_elapsed_ms = vinput::time::MillisecondsSince(prepare_started_at);
-  vinput::debug::Log("ASR backend prepared and warmed up in %lld ms\n",
-                     static_cast<long long>(prepare_elapsed_ms));
+  VLOG_DEBUG("ASR backend prepared and warmed up in {} ms", prepare_elapsed_ms);
 
   prepared->backend = std::move(backend);
   prepared->descriptor = descriptor;
@@ -503,7 +495,7 @@ void RecognitionSessionManager::ReloadWorkerMain() {
     PreparedBackend prepared;
     std::string error;
     const auto reload_started_at = std::chrono::steady_clock::now();
-    vinput::debug::Log("ASR backend reload worker started\n");
+    VLOG_DEBUG("ASR backend reload worker started");
     const bool ok = CreatePreparedBackendForReload(settings, signature, &prepared, &error);
     const auto reload_elapsed_ms = vinput::time::MillisecondsSince(reload_started_at);
 
@@ -519,8 +511,7 @@ void RecognitionSessionManager::ReloadWorkerMain() {
         last_reload_error_.clear();
         reload_in_progress_ = false;
       }
-      vinput::debug::Log("ASR backend reload applied asynchronously in %lld ms\n",
-                         static_cast<long long>(reload_elapsed_ms));
+      VLOG_DEBUG("ASR backend reload applied asynchronously in {} ms", reload_elapsed_ms);
       NotifyReloadResult(true, {});
       continue;
     }
