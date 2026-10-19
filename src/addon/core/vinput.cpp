@@ -5,6 +5,7 @@
 #include <dbus_public.h>
 #include <fcitx-config/iniparser.h>
 #include <fcitx-utils/event.h>
+#include <fcitx-utils/log.h>
 #include <fcitx/inputcontext.h>
 #include <fstream>
 #include <memory>
@@ -37,6 +38,12 @@ constexpr uint64_t kContextFlushDelayUsec = 5 * 1000 * 1000; // 5 seconds
 void ensureDaemonServiceInstalled() {
   if (!vinput::sandbox::IsInSandbox())
     return;
+
+  const auto missing = vinput::sandbox::MissingSandboxPermissions();
+  if (!missing.empty()) {
+    FCITX_LOG(Warn) << "vinput: missing sandbox permissions, run override commands:\n"
+                    << vinput::sandbox::FormatOverrideCommands(missing);
+  }
 
   const std::filesystem::path dest = vinput::path::DaemonServiceUnitInstallPath();
   if (dest.empty()) {

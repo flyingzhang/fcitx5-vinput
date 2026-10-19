@@ -6,6 +6,8 @@
 #include <sys/stat.h>
 #include <system_error>
 
+#include "common/utils/sandbox.h"
+
 #include "config.h"
 
 namespace vinput::path {
@@ -25,11 +27,6 @@ std::filesystem::path FlatpakBundledSystemdUnitPath(std::string_view unit_name) 
 
 std::filesystem::path FlatpakBundledExecutablePath(std::string_view name) {
   return FlatpakAddonRootDir() / "bin" / std::filesystem::path(name);
-}
-
-bool IsInsideFlatpak() {
-  struct stat st;
-  return stat("/.flatpak-info", &st) == 0;
 }
 
 std::filesystem::path UserSystemdUnitPath(std::string_view unit_name) {
@@ -106,7 +103,7 @@ std::string_view DaemonServiceUnitName() {
 }
 
 std::filesystem::path DaemonExecutablePath() {
-  if (IsInsideFlatpak()) {
+  if (vinput::sandbox::IsInSandbox()) {
     return FlatpakBundledExecutablePath(kDaemonExecutableName);
   }
   return std::filesystem::path(kDaemonExecutableName);
@@ -117,7 +114,7 @@ std::filesystem::path DaemonServiceUnitInstallPath() {
 }
 
 std::filesystem::path DaemonServiceUnitTemplatePath() {
-  if (IsInsideFlatpak()) {
+  if (vinput::sandbox::IsInSandbox()) {
     return FlatpakBundledSystemdUnitPath(DaemonServiceUnitName());
   }
   return {};
