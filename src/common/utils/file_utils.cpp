@@ -12,6 +12,7 @@
 #include <ios>
 #include <iterator>
 #include <memory>
+#include <mio/mmap.hpp>
 #include <openssl/evp.h>
 #include <openssl/types.h>
 #include <string>
@@ -103,6 +104,72 @@ bool ResolveSymlinkPathImpl(const std::filesystem::path& path, std::filesystem::
                                 depth + 1);
 }
 
+constexpr size_t kStreamBufferSize = 65536;
+constexpr std::string_view kEmptyFileSha256 =
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+std::string FinalizeHashToHex(EVP_MD_CTX* ctx, std::string* error) {
+  unsigned char hash[EVP_MAX_MD_SIZE];
+  unsigned int hash_len = 0;
+  if (EVP_DigestFinal_ex(ctx, hash, &hash_len) != 1) {
+    if (error != nullptr) {
+      *error = "EVP_DigestFinal_ex failed";
+    }
+    return {};
+  }
+
+  std::string hex;
+  hex.reserve(static_cast<size_t>(hash_len) * 2);
+  for (size_t i = 0; i < static_cast<size_t>(hash_len); ++i) {
+    char pair[3];
+    std::snprintf(pair, sizeof(pair), "%02x", *(hash + i));
+    hex += pair;
+  }
+
+  if (error != nullptr) {
+    error->clear();
+  }
+  return hex;
+}
+
+std::string ComputeFileSha256StreamFallback(const std::filesystem::path& path, std::string* error) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file.is_open()) {
+    if (error != nullptr) {
+      *error = "failed to open file for SHA-256 calculation: " + path.string();
+    }
+    return {};
+  }
+
+  const std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> ctx(EVP_MD_CTX_new(),
+                                                                    &EVP_MD_CTX_free);
+  if (ctx == nullptr) {
+    if (error != nullptr) {
+      *error = "failed to allocate EVP_MD_CTX";
+    }
+    return {};
+  }
+
+  if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1) {
+    if (error != nullptr) {
+      *error = "EVP_DigestInit_ex failed";
+    }
+    return {};
+  }
+
+  char buffer[kStreamBufferSize];
+  while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0) {
+    if (EVP_DigestUpdate(ctx.get(), buffer, static_cast<size_t>(file.gcount())) != 1) {
+      if (error != nullptr) {
+        *error = "EVP_DigestUpdate failed";
+      }
+      return {};
+    }
+  }
+
+  return FinalizeHashToHex(ctx.get(), error);
+}
+
 } // namespace
 
 namespace vinput::file {
@@ -189,6 +256,123 @@ const std::filesystem::path& ScopedTempDir::Path() const {
 
 bool ScopedTempDir::IsValid() const {
   return active_ && !path_.empty();
+}
+
+struct ReadOnlyFileMapping::Impl {
+  mio::mmap_source mmap;
+};
+
+ReadOnlyFileMapping::ReadOnlyFileMapping() = default;
+ReadOnlyFileMapping::~ReadOnlyFileMapping() = default;
+ReadOnlyFileMapping::ReadOnlyFileMapping(ReadOnlyFileMapping&& other) noexcept
+    : impl_(std::move(other.impl_)), is_empty_file_(std::exchange(other.is_empty_file_, false)) {}
+
+ReadOnlyFileMapping& ReadOnlyFileMapping::operator=(ReadOnlyFileMapping&& other) noexcept {
+  if (this != &other) {
+    impl_ = std::move(other.impl_);
+    is_empty_file_ = std::exchange(other.is_empty_file_, false);
+  }
+  return *this;
+}
+
+ReadOnlyFileMapping ReadOnlyFileMapping::Map(const std::filesystem::path& path,
+                                             std::string* error) {
+  ReadOnlyFileMapping result;
+  std::error_code fs_ec;
+  const auto status = std::filesystem::status(path, fs_ec);
+  if (fs_ec || !std::filesystem::exists(status)) {
+    if (error != nullptr) {
+      *error = "file does not exist or is inaccessible: " + path.string();
+    }
+    return result;
+  }
+
+  if (std::filesystem::is_directory(status)) {
+    if (error != nullptr) {
+      *error = "cannot map directory: " + path.string();
+    }
+    return result;
+  }
+
+  const auto file_size = std::filesystem::file_size(path, fs_ec);
+  if (!fs_ec && file_size == 0) {
+    std::ifstream probe(path, std::ios::binary);
+    if (!probe.is_open()) {
+      if (error != nullptr) {
+        *error = "failed to open empty file for reading: " + path.string();
+      }
+      return result;
+    }
+    // Verify that the file is genuinely empty rather than a pseudo-file with size 0 (e.g.
+    // /proc/...).
+    if (probe.peek() == std::ifstream::traits_type::eof()) {
+      result.is_empty_file_ = true;
+      if (error != nullptr) {
+        error->clear();
+      }
+      return result;
+    }
+    if (error != nullptr) {
+      *error = "cannot memory map pseudo-file with dynamic contents: " + path.string();
+    }
+    return result;
+  }
+
+  std::error_code mmap_ec;
+  auto impl = std::make_unique<Impl>();
+  impl->mmap = mio::make_mmap_source(path.string(), mmap_ec);
+  if (mmap_ec || !impl->mmap.is_open()) {
+    if (error != nullptr) {
+      *error = "failed to map file: " + mmap_ec.message();
+    }
+    return result;
+  }
+
+  result.impl_ = std::move(impl);
+  if (error != nullptr) {
+    error->clear();
+  }
+  return result;
+}
+
+bool ReadOnlyFileMapping::IsValid() const noexcept {
+  return is_empty_file_ || (impl_ != nullptr && impl_->mmap.is_open());
+}
+
+std::string_view ReadOnlyFileMapping::StringView() const noexcept {
+  if (is_empty_file_ || impl_ == nullptr || !impl_->mmap.is_open()) {
+    return {};
+  }
+  return {impl_->mmap.data(), impl_->mmap.size()};
+}
+
+std::string_view ReadOnlyFileMapping::View() const noexcept {
+  return StringView();
+}
+
+const char* ReadOnlyFileMapping::Data() const noexcept {
+  if (is_empty_file_) {
+    return "";
+  }
+  if (impl_ == nullptr || !impl_->mmap.is_open()) {
+    return nullptr;
+  }
+  return impl_->mmap.data();
+}
+
+size_t ReadOnlyFileMapping::Size() const noexcept {
+  if (is_empty_file_ || impl_ == nullptr || !impl_->mmap.is_open()) {
+    return 0;
+  }
+  return impl_->mmap.size();
+}
+
+bool ReadOnlyFileMapping::IsEmpty() const noexcept {
+  return Size() == 0;
+}
+
+ReadOnlyFileMapping MapFileReadOnly(const std::filesystem::path& path, std::string* error) {
+  return ReadOnlyFileMapping::Map(path, error);
 }
 
 bool ResolveSymlinkPath(const std::filesystem::path& path, std::filesystem::path* resolved,
@@ -345,61 +529,76 @@ bool AtomicWriteTextFile(const std::filesystem::path& target, std::string_view c
 }
 
 std::string ComputeFileSha256(const std::filesystem::path& path, std::string* error) {
-  std::ifstream file(path, std::ios::binary);
-  if (!file.is_open()) {
+  std::error_code fs_ec;
+  const auto status = std::filesystem::status(path, fs_ec);
+  if (fs_ec || !std::filesystem::exists(status)) {
     if (error != nullptr) {
       *error = "failed to open file for SHA-256 calculation: " + path.string();
     }
     return {};
   }
 
-  const std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> ctx(EVP_MD_CTX_new(),
-                                                                    &EVP_MD_CTX_free);
-  if (ctx == nullptr) {
+  if (std::filesystem::is_directory(status)) {
     if (error != nullptr) {
-      *error = "failed to allocate EVP_MD_CTX";
+      *error = "failed to open file for SHA-256 calculation: " + path.string();
     }
     return {};
   }
 
-  if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1) {
-    if (error != nullptr) {
-      *error = "EVP_DigestInit_ex failed";
-    }
-    return {};
-  }
-
-  char buffer[8192];
-  while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0) {
-    if (EVP_DigestUpdate(ctx.get(), buffer, static_cast<size_t>(file.gcount())) != 1) {
+  const auto file_size = std::filesystem::file_size(path, fs_ec);
+  if (!fs_ec && file_size == 0) {
+    // Defense in depth: POSIX mmap returns EINVAL on 0-byte mappings.
+    // Verify file readability first.
+    std::ifstream probe(path, std::ios::binary);
+    if (!probe.is_open()) {
       if (error != nullptr) {
-        *error = "EVP_DigestUpdate failed";
+        *error = "failed to open file for SHA-256 calculation: " + path.string();
       }
       return {};
     }
-  }
-
-  unsigned char hash[EVP_MAX_MD_SIZE];
-  unsigned int hash_len = 0;
-  if (EVP_DigestFinal_ex(ctx.get(), hash, &hash_len) != 1) {
-    if (error != nullptr) {
-      *error = "EVP_DigestFinal_ex failed";
+    // Confirm it's truly empty, rather than a virtual pseudo-file with st_size = 0 (e.g. /proc/...)
+    if (probe.peek() == std::ifstream::traits_type::eof()) {
+      if (error != nullptr) {
+        error->clear();
+      }
+      return std::string(kEmptyFileSha256);
     }
-    return {};
+    // If it yields bytes despite st_size == 0, fallback to streaming read.
+    return ComputeFileSha256StreamFallback(path, error);
   }
 
-  std::string hex;
-  hex.reserve(static_cast<size_t>(hash_len) * 2);
-  for (size_t i = 0; i < static_cast<size_t>(hash_len); ++i) {
-    char pair[3];
-    std::snprintf(pair, sizeof(pair), "%02x", *(hash + i));
-    hex += pair;
+  auto mapping = ReadOnlyFileMapping::Map(path, nullptr);
+  if (mapping.IsValid()) {
+    const std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> ctx(EVP_MD_CTX_new(),
+                                                                      &EVP_MD_CTX_free);
+    if (ctx == nullptr) {
+      if (error != nullptr) {
+        *error = "failed to allocate EVP_MD_CTX";
+      }
+      return {};
+    }
+
+    if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1) {
+      if (error != nullptr) {
+        *error = "EVP_DigestInit_ex failed";
+      }
+      return {};
+    }
+
+    const auto sv = mapping.StringView();
+    if (!sv.empty()) {
+      if (EVP_DigestUpdate(ctx.get(), sv.data(), sv.size()) != 1) {
+        if (error != nullptr) {
+          *error = "EVP_DigestUpdate failed";
+        }
+        return {};
+      }
+    }
+
+    return FinalizeHashToHex(ctx.get(), error);
   }
 
-  if (error != nullptr) {
-    error->clear();
-  }
-  return hex;
+  return ComputeFileSha256StreamFallback(path, error);
 }
 
 bool IsDirectoryWritable(const std::filesystem::path& path) {
