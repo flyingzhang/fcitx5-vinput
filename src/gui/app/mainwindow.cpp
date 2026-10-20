@@ -6,12 +6,15 @@
 #include <QHBoxLayout>
 #include <QLocale>
 #include <QMessageBox>
+#include <QPointer>
 #include <QPushButton>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QtCore/qpointer.h>
 #include <QtGui/qclipboard.h>
 #include <QtGui/qguiapplication.h>
 #include <QtWidgets/qmessagebox.h>
+#include <atomic>
 #include <fstream>
 #include <nlohmann/json.hpp>
 
@@ -184,16 +187,22 @@ QString localizedString(const nlohmann::json& obj) {
 } // namespace
 
 void MainWindow::checkNotification() {
+  const QPointer<MainWindow> self(this);
   auto* worker = new vinput::gui::DownloadWorker(this);
-  worker->SetTask([this](std::string* /*error*/) -> bool {
+  worker->SetTask([self](std::string* /*error*/, const std::atomic<bool>* cancel_token) -> bool {
     const std::vector<std::string> urls = {
         "https://raw.githubusercontent.com/xifan2333/fcitx5-vinput/main/"
         "notification.json"};
     std::string content;
     vinput::download::Options opts;
     opts.timeout_seconds = 5;
+    opts.cancel_token = cancel_token;
     if (!vinput::download::DownloadText(urls, opts, &content)) {
-      return true; // silent fail
+      return true; // silent fail or cancelled
+    }
+
+    if (cancel_token != nullptr && cancel_token->load(std::memory_order_relaxed)) {
+      return true;
     }
 
     nlohmann::json j;
@@ -227,8 +236,21 @@ void MainWindow::checkNotification() {
     const QString url = QString::fromStdString(j.value("url", std::string{}));
     const QString id = QString::number(remote_id);
 
+    if (cancel_token != nullptr && cancel_token->load(std::memory_order_relaxed)) {
+      return true;
+    }
+
+    if (self.isNull()) {
+      return true;
+    }
+
     QMetaObject::invokeMethod(
-        this, [this, id, title, text, url]() { onNotificationReady(id, title, text, url); },
+        self.data(),
+        [self, id, title, text, url]() {
+          if (!self.isNull()) {
+            self->onNotificationReady(id, title, text, url);
+          }
+        },
         Qt::QueuedConnection);
 
     return true;
