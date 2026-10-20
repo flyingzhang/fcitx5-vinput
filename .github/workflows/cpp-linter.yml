@@ -2,6 +2,14 @@ name: cpp-linter
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'CMakeLists.txt'
+      - 'CMakePresets.json'
+      - '.clang-format'
+      - '.clang-tidy'
   workflow_dispatch:
 
 permissions:
@@ -14,6 +22,7 @@ concurrency:
 jobs:
   cpp-linter:
     name: cpp-linter
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6

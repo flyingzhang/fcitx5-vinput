@@ -21,9 +21,9 @@ gh workflow run release.yml --ref <branch> && gh run watch     # Remote multi-ar
 
 ## 2. Hard Constraints (Red Lines)
 
-- **No Direct Main Commits for Code**: Always develop via feature branches and Draft PRs. Pure documentation, text edits, and agent guidelines/skills (`AGENTS.md`, `CLAUDE.md`, `.agents/`) are exempt and may be committed directly to `main` using `[skip ci]` without PR/CI overhead.
+- **No Direct Main Commits for Code**: Always develop via feature branches and Draft PRs. Pure documentation, text edits, and agent guidelines/skills (`AGENTS.md`, `CLAUDE.md`, `.agents/`) are exempt and may be committed directly to `main` using `[skip ci]`. CI workflows enforce an explicit source whitelist (`paths`), guaranteeing zero runner consumption for docs, rules, and workflow edits.
 - **Draft PR Pre-Creation**: Open a Draft PR with ALL checklist items UNCHECKED (`- [ ]`) before writing code.
-- **No Multi-Task Lump Commits**: Every commit must map to exactly one `- [ ]` task in the PR checklist.
+- **No Multi-Task Lump Commits & Progressive Sync**: For changes developed via Draft PRs, every commit must map to exactly one `- [ ]` task in the PR checklist. Commit atomically, push to the branch, and check off `- [x]` in lockstep. Full matrix CI is automatically skipped in Draft and triggers on `gh pr ready` (or manual `gh workflow run ci.yml --ref <branch>`).
 - **Pre-Commit Quality Gate**: Run `mise run check:changed` or `hk run check --safe` before pushing.
 - **Hardware-Adaptive Compilation**: If the GitHub user is `xifan2333`, **local compilation is strictly prohibited (never run `mise run build-debug`)**; the CI pipeline must be prioritized (`ci.yml` / `release.yml`).
 - **No Force-Push to Contributor Forks**: Never `git push -f` to external contributors' forks or branches.
@@ -32,6 +32,8 @@ gh workflow run release.yml --ref <branch> && gh run watch     # Remote multi-ar
 - **Three-Tier Priority-First Dependency Governance**: No network downloads or `FetchContent` during build. Follow Three-Tier Priority Cascade: Tier 1/2 universal libraries via host packages (`find_package REQUIRED`); Tier 3 missing/single-header libraries vendored under `3rdparty/` with CMake `SYSTEM INTERFACE` and registered in `THIRD_PARTY_NOTICES.md`. Hand-crafted infrastructure (Unicode/Base64 tables) is forbidden.
 - **PR Micro-Slicing**: Keep functional code changes <300 lines; break large epics into stacked micro-PRs.
 - **AI Attribution & Disclosure**: Append `*AI-assisted — Tool: <tool>; model: <provider>/<model>; version: <version-or-unavailable>.*` to PR descriptions, review fixes, and substantive comments.
+- **Dialectical Review Bot Triage & Pre-Action Reporting**: Never blindly follow CodeRabbit/Greptile suggestions. Critically evaluate findings against C++20 and project architecture. Before writing fix code, the agent MUST explicitly report its analysis (true issues vs. false positives and next actions) to the user in chat.
+- **Non-Blocking Handover (No CI Polling)**: Never busy-wait on remote CI (`gh run watch` or sleep polling). After `gh pr ready`, output PR/run URLs and yield control. Further review triage or merge actions are event-driven upon user prompt.
 - **Upstream-First API Policy (Context7)**:
   - `src/addon/`: Fcitx5 (`fcitx/fcitx5`)
   - `src/daemon/asr/`: sherpa-onnx (`k2-fsa/sherpa-onnx`)

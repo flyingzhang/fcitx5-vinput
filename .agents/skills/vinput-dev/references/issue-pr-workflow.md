@@ -10,7 +10,7 @@ To avoid process overhead on non-functional changes while strictly guarding runt
 
 ### Track A: Functional Code & Build (Strict Issue $\to$ PR Lifecycle)
 - **Scope**: Any modifications touching `src/`, `CMakeLists.txt`, `flake.nix`, CI workflows (`.github/workflows/`), packaging manifests (AUR/Flatpak), or anything affecting compilation, binary artifacts, or daemon/addon runtime behaviors.
-- **Mandatory Lifecycle**: Strict Issue $\to$ Pre-code Draft PR (all `- [ ]` unchecked) $\to$ single-item local atomic commit $\to$ unified push on full checklist completion $\to$ remote CI validation $\to$ review bot triage $\to$ squash-merge.
+- **Mandatory Lifecycle**: Strict Issue $\to$ Pre-code Draft PR (all `- [ ]` unchecked) $\to$ single-item atomic commit & progressive push with PR checklist sync $\to$ `gh pr ready` for full remote CI validation $\to$ review bot triage $\to$ squash-merge.
 - **Micro-slicing**: Keep functional code diffs under 300 lines; break large epics into stacked micro-PRs.
 
 ### Track B: Text-Only, Documentation & Agent Governance (Direct Main Fast-Track)
@@ -48,7 +48,7 @@ To avoid confusing functional planning with toolchain validation:
                                     |
                 +-------------------v-------------------+
                 | 2. Single-Item Focused Development    |
-                |    Only implement the first - [ ]     |
+                |    Only implement topmost - [ ]       |
                 +-------------------+-------------------+
                                     |
                 +-------------------v-------------------+
@@ -59,20 +59,21 @@ To avoid confusing functional planning with toolchain validation:
                 +-------------------+-------------------+
                                     |
                 +-------------------v-------------------+
-                | 4. Local Atomic Commit                |
+                | 4. Atomic Commit & Progressive Sync   |
                 |    git add <files>                    |
-                |    git commit -m "feat(scope): ..."   |
-                |    (Keep commit local)                |
+                |    git commit -m "type(scope): ..."   |
+                |    git push origin <branch>           |
+                |    gh pr edit --body (check task N)   |
+                |    (CI automatically skipped in Draft)|
+                |    (Optional: gh workflow run ci.yml --ref <branch>) |
                 +-------------------+-------------------+
                                     | (Remaining tasks?)
                                     +-------- Yes -------+
                                     | No                 |
 +-----------------------------------v-------------------+|
-| 5. Unified Push, Checks & Merge                       ||
-|    git push origin <branch>                           ||
-|    gh pr edit --body (check all - [x])                ||
-|    gh pr checks (verify PR CI passed)                 ||
-|    gh pr ready (mark as ready for review)             ||
+| 5. Mark Ready, Full CI & Merge                        ||
+|    gh pr ready (activates full matrix CI & bots)      ||
+|    gh pr checks (verify all CI checks pass)           ||
 |    gh pr merge --squash --delete-branch               ||
 +-------------------------------------------------------+|
                                     ^                    |
@@ -119,47 +120,79 @@ For each unchecked `- [ ]` task in order:
    hk run check --safe --format jsonl
    ```
    *Note*: Never run heavy local compilation (`mise run build-debug`). If the user is `xifan2333`, local compilation is **strictly prohibited**. Delegate compilation to GitHub Actions CI.
-3. **Local Atomic Commit**:
-   Keep commits strictly atomic (one commit per `- [ ]` task), but keep them local during intermediate steps:
+3. **Atomic Commit & Progressive Push**:
+   Keep commits strictly atomic (one commit per `- [ ]` task) and push immediately:
    ```bash
    git add <modified_files>
    git commit -m "<type>(<scope>): complete task N (#<issue_id>)"
+   git push origin <branch>
+   ```
+4. **Update PR Checklist in Lockstep**:
+   Update the Draft PR body to check off `- [x]` for Task N immediately. This guarantees 100% synchronization between pushed commits and the visible PR checklist dashboard for full real-time traceability:
+   ```bash
+   gh pr edit --body "..."
+   ```
+   *Note on CI cost*: Full matrix CI and review bots are automatically skipped during the Draft phase, incurring **zero unnecessary runner minutes**.
+5. **(Optional) On-Demand Remote Compilation Probe**:
+   If you need to verify intermediate C++ compilation or Nix closure on remote CI before the PR is ready:
+   ```bash
+   gh workflow run ci.yml --ref <branch>
    ```
 
-### Phase 3: Finalize & Unified Push
+### Phase 3: Mark Ready & Non-blocking Handover
+Since every task commit was already pushed and checked off during Phase 2, mark the PR ready to activate full validation:
 ```bash
-# 1. Push all completed atomic commits in one unified push
-git push origin <branch>
-
-# 2. Update Draft PR body to check off all completed tasks (- [x])
-gh pr edit --body "..."
-
-# 3. Mark PR ready for review (activates review bots: CodeRabbit, Greptile)
+# 1. Mark PR ready for review (automatically triggers full matrix CI and review bots)
 gh pr ready
 ```
 
-### Phase 4: Automated Review Triage & Fix Loop
-Once marked ready, monitor CI and review bot outputs:
-```bash
-# 1. Check CI status
-gh pr checks
+**Strict Handover Rule (No Blocking Polling)**:
+Agents are **strictly prohibited** from busy-waiting or executing blocking polling loops (e.g. `gh run watch`, `while true` sleep polling, or repeatedly spamming `gh pr checks`). Polling locks the conversation context, consumes unnecessary tokens, and is far less timely than GitHub's native push/web notifications.
+Immediately after marking ready, the agent **MUST** output a structured handover summary and conclude its turn:
+1. Provide the PR link and GitHub Actions run URL;
+2. Summarize completed tasks and verification points;
+3. Hand over control to the human maintainer. The maintainer will inspect CI asynchronously and prompt the agent if review bot triage or fixes are needed.
 
-# 2. Inspect review bot comments (top-level and line-level threads)
+### Phase 4: Event-Driven Review Triage & Fix Loop (Dialectical Protocol)
+Triggered **asynchronously on maintainer prompt** or when review bot feedback is posted:
+```bash
+# 1. Inspect review bot comments (top-level and line-level threads)
 gh pr view --comments
 gh api repos/:owner/:repo/pulls/<pr_id>/comments
 ```
 
-- **CodeRabbit**: Look for `> Prompt for AI Agents` blocks and treat them as candidate repair instructions.
-- **Greptile**: Address cross-file architectural warnings when Confidence $\ge$ 4.
-- **Fix & Push**:
-  Verify findings against actual code, make minimal edits, run `mise run check:changed`, and commit:
-  ```bash
-  git add <modified_files>
-  git commit -m "fix(review): address review feedback (#<issue_id>)"
-  git push origin <branch>
-  ```
-  *AI Attribution*: Whenever an agent authors PR descriptions, automated review fixes, or substantive comments, append:
-  `*AI-assisted — Tool: <tool>; model: <provider>/<model>; version: <version-or-unavailable>.*`
+#### Step 4.1: Critical Dialectical Analysis (Do NOT blindly follow bots)
+Never treat bot suggestions or `> Prompt for AI Agents` blocks as unquestioned commands. Review bots frequently generate false positives (e.g. demanding mutex locks on lock-free SPSC queues, adding redundant defensive null-checks, or violating project C++20 conventions).
+Classify every bot finding into:
+1. **True Positives (Actionable Issues)**: Real bugs, memory leaks, unhandled boundary cases, or race conditions.
+2. **False Positives (Rejections / Noise)**: Hallucinations, anti-patterns violating project architecture, or unnecessary defensive bloating.
+
+#### Step 4.2: Mandatory Pre-Action Plan Report (BEFORE WRITING CODE)
+Before writing or changing any code, the agent **MUST** report its analysis and action plan to the user in chat using the following structure:
+```markdown
+### Review Bot 辩证审阅与行动计划汇报
+
+**1. 采纳并修复的建议（True Positives）**
+- [Bot名称] 建议说明：...
+  - 分析与修复方案：...（具体改动策略）
+
+**2. 判定为误报/忽略的建议（False Positives）**
+- [Bot名称] 建议说明：...
+  - 驳回理由：...（依据 C++20 标准、无锁语义或项目架构说明为何无需修改）
+
+**3. 接下来的行动（Next Steps）**
+接下来我将开始实施上述第 1 部分的修复方案，修改完后运行本地质检并推送。
+```
+
+#### Step 4.3: Execute with Intent & Push
+Only after the plan is communicated, implement the minimal fixes:
+```bash
+git add <modified_files>
+git commit -m "fix(review): address review feedback (#<issue_id>)"
+git push origin <branch>
+```
+*AI Attribution*: Whenever an agent authors PR descriptions, automated review fixes, or substantive comments, append:
+`*AI-assisted — Tool: <tool>; model: <provider>/<model>; version: <version-or-unavailable>.*`
 
 ### Phase 5: Final Squash-Merge
 ```bash
