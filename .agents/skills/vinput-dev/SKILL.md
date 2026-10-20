@@ -1,6 +1,6 @@
 ---
 name: vinput-dev
-description: Complete development, fork contribution, code health check, Issue+PR workflow, and multi-repo ecosystem guide for fcitx5-vinput. Use when developing or refactoring daemon/addon C++20 code, contributing from a fork, syncing with upstream, running pre-PR clean-up inspections (代码体检), following the Issue+Draft PR lifecycle, working across related repositories (vinput-registry, aur-auto, flatpak-auto), debugging PipeWire audio or D-Bus services, or running CI and release pipelines. Trigger also on Chinese requests such as 开发 fcitx5-vinput、改代码、添加语音识别厂商/场景适配器、根据 issue 拆解开发、开 PR/提 PR、Fork 贡献与上游同步、代码体检与格式化自检、CI 编译/发版、调试 PipeWire 录音或排查 daemon 日志.
+description: Complete development, fork contribution, code health check, Issue+PR workflow, dependency governance, and multi-repo ecosystem guide for fcitx5-vinput. Use when developing or refactoring daemon/addon C++20 code, introducing or managing third-party dependencies (CMake/flake.nix/3rdparty), contributing from a fork, syncing with upstream, running pre-PR clean-up inspections (代码体检), following the Issue+Draft PR lifecycle, working across related repositories (vinput-registry, aur-auto, flatpak-auto), debugging PipeWire audio or D-Bus services, or running CI and release pipelines. Trigger also on Chinese requests such as 开发 fcitx5-vinput、改代码、添加语音识别厂商/场景适配器、根据 issue 拆解开发、开 PR/提 PR、Fork 贡献与上游同步、代码体检与格式化自检、CI 编译/发版、调试 PipeWire 录音或排查 daemon 日志、引入/治理第三方依赖、配置 CMake/Nix 依赖、3rdparty 库内嵌.
 ---
 
 # fcitx5-vinput Unified Development Skill
@@ -51,10 +51,11 @@ Agents must progressively load detailed operational manuals according to the cur
 
 ### Branch: Developing Features or Bugfixes
 Read **[references/issue-pr-workflow.md](references/issue-pr-workflow.md)**
-- **Trigger**: When starting any new feature, bugfix, or refactoring in `fcitx5-vinput`.
+- **Trigger**: When starting any new feature, bugfix, or functional refactoring in `fcitx5-vinput` (pure documentation and agent skill changes follow the direct-to-main fast-track).
 - **Core Standard**: Strict Issue $\to$ Pre-code Draft PR (all `- [ ]` unchecked) $\to$ single-item local atomic commit $\to$ unified push on full checklist completion $\to$ review-fix triage loop.
 - **Micro-slicing**: Keep functional code diffs under 300 lines; break large epics into stacked micro-PRs.
 - **Config Migration**: Breaking config changes require updating `src/common/config/config_migration.cpp` in the same PR.
+- **Fast-Track Policy**: Non-functional text, documentation, and agent rules bypass the Issue/PR lifecycle and may be committed directly to `main` with `[skip ci]`.
 
 ### Branch: Compiling, Testing, or Triggering CI
 Read **[references/compilation-ci.md](references/compilation-ci.md)**
@@ -70,6 +71,11 @@ Read **[references/fork-guide.md](references/fork-guide.md)**
 Read **[references/ecosystem.md](references/ecosystem.md)**
 - **Trigger**: When adding cloud speech scripts, scene prompts, AUR PKGBUILD updates, or Flatpak manifests.
 - **Core Standard**: Cloud ASR and LLM scripts in `vinput-registry` must use Python standard library only (zero pip dependencies) and standard `VINPUT_ASR_*` environment variables.
+
+### Branch: Managing Dependencies & Third-Party Modernization
+Read **[references/dependency-spec.md](references/dependency-spec.md)**
+- **Trigger**: When adding or upgrading third-party C++ libraries, configuring CMake dependencies, updating `flake.nix` `buildInputs`, vendoring header-only libraries under `3rdparty/`, or touching `THIRD_PARTY_NOTICES.md`.
+- **Core Standard**: Follow Three-Tier Strategy (System-Only, System-Distributed, Vendored 3rdparty). Strict offline-friendly policy: zero network downloads (`FetchContent` git clone forbidden in builds for Nix/Flatpak/Arch chroot). Vendored libraries must be isolated via CMake `SYSTEM INTERFACE` to prevent `clang-tidy` diagnostic pollution without suppressing warnings. Hand-crafted infrastructure (e.g. ad-hoc Unicode/Base64 tables) is forbidden.
 
 ### Branch: Diagnosing Audio Streams or Daemon Runtime
 Read **[references/audio-debugging.md](references/audio-debugging.md)**

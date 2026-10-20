@@ -19,7 +19,8 @@ Progressive operational guide, hard constraints, and routing index for AI coding
 
 ## 2. Hard Constraints (Red Lines)
 
-1. **No Direct Main Commits**: Never push implementation code directly to `main`. Always develop via feature branches and Draft PRs.
+1. **No Direct Main Commits for Code**: Never push implementation code, build configurations, or tests directly to `main`. Always develop via feature branches and Draft PRs.
+   *Fast-track Exception (Doc & Agent Rules)*: Pure documentation, agent guides/skills (`AGENTS.md`, `CLAUDE.md`, `.agents/`), and non-functional textual edits that do not alter binary outputs or require CI validation are exempt from the Issue-PR lifecycle and may be committed directly to `main` with `[skip ci]`.
 2. **Draft PR Pre-Creation**: Open a Draft PR with ALL checklist items UNCHECKED (`- [ ]`) before writing any implementation code.
 3. **No Multi-Task Lump Commits**: Every commit must map to exactly one `- [ ]` task in the PR checklist. Keep commits local until all checklist tasks pass local quality gates.
 4. **Pre-Commit Quality Gate**: Run `mise run check:changed` or `hk run check --safe` before pushing.
@@ -35,6 +36,7 @@ Progressive operational guide, hard constraints, and routing index for AI coding
 12. **AI Attribution & Disclosure**: Append `*AI-assisted — Tool: <tool>; model: <provider>/<model>; version: <version-or-unavailable>.*` to PR descriptions, review fixes, and substantive review comments.
 13. **Upstream-First API Policy**: Prohibited from writing custom glue or ad-hoc state machines across the five pillars. Ground implementations via Context7 before making non-trivial modifications.
 14. **Semantic Versioning Integrity**: Schema changes require a MINOR bump (`x.Y.0`). Never release breaking configuration changes as a PATCH (`x.y.Z`).
+15. **Three-Tier Dependency & Offline Build Governance**: Never use CMake `FetchContent` with Git/HTTP downloads at build time (violates NixOS, Flatpak, and Arch offline sandboxes). Strictly follow the Three-Tier Strategy: Layer 1/2 libraries must be resolved via system packages (`find_package`); Layer 3 lightweight header-only libraries must be vendored under `3rdparty/`, isolated via CMake `SYSTEM INTERFACE` (exempt from `clang-tidy` without suppressing diagnostics), and registered in `THIRD_PARTY_NOTICES.md`. Hand-crafted infrastructure (e.g. ad-hoc Unicode/Base64 tables) is strictly prohibited.
 
 ---
 
@@ -59,11 +61,12 @@ To avoid context saturation, consult detailed reference manuals on demand when e
 
 | Task Domain / Operational Need | Context Pointer & Target Path | When to Reach |
 | :--- | :--- | :--- |
-| **Issue + Draft PR Workflow** | [issue-pr-workflow.md](.agents/skills/vinput-dev/references/issue-pr-workflow.md) | Initializing branches, formatting PR checklists (`- [ ]`), executing single-item loops, handling CodeRabbit/Greptile review bot triage. |
+| **Issue + Draft PR Workflow** | [issue-pr-workflow.md](.agents/skills/vinput-dev/references/issue-pr-workflow.md) | Initializing branches, formatting PR checklists (`- [ ]`), single-item loops, review bot triage, and text-only fast-track rules. |
 | **Compilation & Release CI** | [compilation-ci.md](.agents/skills/vinput-dev/references/compilation-ci.md) | Triggering remote matrix validation, multi-distro dry runs, SemVer rules, and `notification.json` breaking-change prompt specifications. |
 | **Multi-Repo Ecosystem** | [ecosystem.md](.agents/skills/vinput-dev/references/ecosystem.md) | Adding cloud ASR providers / LLM scenes in `vinput-registry`, AUR updates in `aur-auto`, and Flatpak OSTree sync in `flatpak-auto`. |
 | **Fork Contribution & Sync** | [fork-guide.md](.agents/skills/vinput-dev/references/fork-guide.md) | Working from an external fork, setting remotes, syncing with upstream, and avoiding fork force-pushes. |
 | **Audio & Daemon Debugging** | [audio-debugging.md](.agents/skills/vinput-dev/references/audio-debugging.md) | Diagnosing PipeWire capture issues, SPA buffers, XRuns, `vinput-daemon.service` journalctl, and `VINPUT_DEBUG=1` tracing. |
+| **Dependency Governance** | [dependency-spec.md](.agents/skills/vinput-dev/references/dependency-spec.md) | Adding/upgrading third-party libraries, `flake.nix` packages, `3rdparty/` vendoring, CMake `SYSTEM INTERFACE` isolation, and license auditing in `THIRD_PARTY_NOTICES.md`. |
 | **Fcitx5 Addon Architecture** | Context7: `/fcitx/fcitx5` | Modifying `src/addon/`, Fcitx5 key event pipelines, addon lifecycle, and Fcitx5 official `fcitx::Configuration` / `fcitx::RawConfig`. |
 | **Local Speech Engine (ASR)** | Context7: `/k2-fsa/sherpa-onnx` | Modifying `src/daemon/asr/`, sherpa-onnx offline/online recognizers, VAD, and model loading. |
 | **Low-Latency Audio Capture** | Context7: `/pipewire/pipewire` | Modifying `src/daemon/audio/`, PipeWire C API, SPA pod formats, and stream lifecycle. |

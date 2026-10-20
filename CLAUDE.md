@@ -21,7 +21,7 @@ gh workflow run release.yml --ref <branch> && gh run watch     # Remote multi-ar
 
 ## 2. Hard Constraints (Red Lines)
 
-- **No Direct Main Commits**: Always develop via feature branches and Draft PRs.
+- **No Direct Main Commits for Code**: Always develop via feature branches and Draft PRs. Pure documentation, text edits, and agent guidelines/skills (`AGENTS.md`, `CLAUDE.md`, `.agents/`) are exempt and may be committed directly to `main` using `[skip ci]` without PR/CI overhead.
 - **Draft PR Pre-Creation**: Open a Draft PR with ALL checklist items UNCHECKED (`- [ ]`) before writing code.
 - **No Multi-Task Lump Commits**: Every commit must map to exactly one `- [ ]` task in the PR checklist.
 - **Pre-Commit Quality Gate**: Run `mise run check:changed` or `hk run check --safe` before pushing.
@@ -29,6 +29,7 @@ gh workflow run release.yml --ref <branch> && gh run watch     # Remote multi-ar
 - **No Force-Push to Contributor Forks**: Never `git push -f` to external contributors' forks or branches.
 - **Breaking Config Changes**: If user-facing keys in `config.json` / `vinput.conf` change incompatibly, add a versioned ConfigMigration step (`src/common/config/config_migration.cpp` `RegisteredSteps`) in the **same PR**. No runtime aliases.
 - **Zero-Tolerance on Suppressing Diagnostics**: Never add `// NOLINT`, `#pragma GCC/clang diagnostic ignored`, or `-Wno-*` in CMake. Fix the root cause cleanly.
+- **Dependency & Offline Build Governance**: No network downloads / `FetchContent` during build. Follow Three-Tier Strategy: Layer 1/2 libraries via system packages (`find_package`); Layer 3 header-only libraries vendored under `3rdparty/` with CMake `SYSTEM INTERFACE` and registered in `THIRD_PARTY_NOTICES.md`. Hand-crafted infrastructure (e.g. ad-hoc Unicode/Base64 tables) is forbidden.
 - **PR Micro-Slicing**: Keep functional code changes <300 lines; break large epics into stacked micro-PRs.
 - **AI Attribution & Disclosure**: Append `*AI-assisted — Tool: <tool>; model: <provider>/<model>; version: <version-or-unavailable>.*` to PR descriptions, review fixes, and substantive comments.
 - **Upstream-First API Policy (Context7)**:
@@ -47,9 +48,10 @@ Consult detailed manuals on demand when entering specific operational workflows:
 
 | Task Branch / Need | Context Pointer & Target Path | When to Reach |
 | :--- | :--- | :--- |
-| **Issue + Draft PR Workflow** | [.agents/skills/vinput-dev/references/issue-pr-workflow.md](.agents/skills/vinput-dev/references/issue-pr-workflow.md) | Initializing branches, formatting PR checklists (`- [ ]`), single-item execution loops, handling review bots. |
+| **Issue + Draft PR Workflow** | [.agents/skills/vinput-dev/references/issue-pr-workflow.md](.agents/skills/vinput-dev/references/issue-pr-workflow.md) | Initializing branches, formatting PR checklists (`- [ ]`), single-item execution loops, handling review bots, and direct-to-main fast-track. |
 | **Compilation & Release CI** | [.agents/skills/vinput-dev/references/compilation-ci.md](.agents/skills/vinput-dev/references/compilation-ci.md) | Remote matrix validation, packaging dry runs, SemVer rules, and `notification.json` specifications. |
 | **Multi-Repo Ecosystem** | [.agents/skills/vinput-dev/references/ecosystem.md](.agents/skills/vinput-dev/references/ecosystem.md) | Adding cloud ASR / LLM scenes in `vinput-registry`, AUR updates in `aur-auto`, Flatpak builds in `flatpak-auto`. |
 | **Fork Contribution & Sync** | [.agents/skills/vinput-dev/references/fork-guide.md](.agents/skills/vinput-dev/references/fork-guide.md) | Working from an external fork, setting remotes, syncing with upstream. |
 | **Audio & Daemon Debugging** | [.agents/skills/vinput-dev/references/audio-debugging.md](.agents/skills/vinput-dev/references/audio-debugging.md) | Troubleshooting PipeWire audio capture, XRuns, D-Bus service crashes, reading systemd logs. |
+| **Dependency Governance** | [.agents/skills/vinput-dev/references/dependency-spec.md](.agents/skills/vinput-dev/references/dependency-spec.md) | Adding/upgrading 3rd-party libraries, `flake.nix` packages, `3rdparty/` vendoring, CMake `SYSTEM INTERFACE` isolation, and license notices. |
 | **Master Development Skill** | [.agents/skills/vinput-dev/SKILL.md](.agents/skills/vinput-dev/SKILL.md) | Master development manual, Pre-PR code health checks, and cross-repo guides. |

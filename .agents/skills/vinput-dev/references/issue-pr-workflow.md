@@ -1,10 +1,29 @@
 # Issue + PR Driven Development Workflow (SOP)
 
-Development must follow a strict, chronological **Pre-Code Draft PR -> Single-Item Loop -> Merge** process.
+Development must follow a strict, chronological **Pre-Code Draft PR -> Single-Item Loop -> Merge** process for functional changes, with a fast-track policy for pure documentation and agent rules.
 
 ---
 
-## 1. Dual-Planning Model
+## 1. Scope Boundaries & Fast-Track Policy
+
+To avoid process overhead on non-functional changes while strictly guarding runtime safety, repository changes are governed under two distinct tracks:
+
+### Track A: Functional Code & Build (Strict Issue $\to$ PR Lifecycle)
+- **Scope**: Any modifications touching `src/`, `CMakeLists.txt`, `flake.nix`, CI workflows (`.github/workflows/`), packaging manifests (AUR/Flatpak), or anything affecting compilation, binary artifacts, or daemon/addon runtime behaviors.
+- **Mandatory Lifecycle**: Strict Issue $\to$ Pre-code Draft PR (all `- [ ]` unchecked) $\to$ single-item local atomic commit $\to$ unified push on full checklist completion $\to$ remote CI validation $\to$ review bot triage $\to$ squash-merge.
+- **Micro-slicing**: Keep functional code diffs under 300 lines; break large epics into stacked micro-PRs.
+
+### Track B: Text-Only, Documentation & Agent Governance (Direct Main Fast-Track)
+- **Scope**: Pure documentation (`docs/`, `*.md`, `THIRD_PARTY_NOTICES.md`), agent skills, prompts, and rules (`AGENTS.md`, `CLAUDE.md`, `.agents/skills/`).
+- **Policy**:
+  1. **Zero Functional Drift**: Does not alter runtime code, binaries, or dependencies.
+  2. **Exempt from Issue/PR**: No need to create a tracking Issue or open a Draft PR.
+  3. **No Heavy CI**: Append `[skip ci]` in the commit message to prevent consuming unnecessary GitHub Actions runner hours.
+  4. **Direct-to-Main Execution**: Run local pre-commit checks (`mise run check:changed`), commit directly, and push to `main`.
+
+---
+
+## 2. Dual-Planning Model
 
 To avoid confusing functional planning with toolchain validation:
 
@@ -15,7 +34,7 @@ To avoid confusing functional planning with toolchain validation:
 
 ---
 
-## 2. Chronological Lifecycle
+## 3. Chronological Lifecycle
 
 ```
 +------------------------------------------------------------------------+
@@ -62,7 +81,7 @@ To avoid confusing functional planning with toolchain validation:
 
 ---
 
-## 3. Detailed Execution Steps
+## 4. Detailed Execution Steps
 
 ### Phase 1: Pre-Code Initialization
 ```bash
