@@ -1,18 +1,15 @@
 #pragma once
+
 #include <algorithm>
 #include <cctype>
-#include <charconv>
-#include <cmath>
 #include <cstddef>
-#include <cstdint>
 #include <cstdio>
 #include <functional>
 #include <initializer_list>
 #include <optional>
-#include <span>
+#include <ranges>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -48,6 +45,10 @@ template <typename T> auto ToCArg(const std::reference_wrapper<T>& ref) {
 
 } // namespace detail
 
+// =========================================================================
+// 1. Formatting (i18n Gettext Bridge)
+// =========================================================================
+
 template <typename... Args> std::string FmtStr(const char* fmt, const Args&... args) {
   if (fmt == nullptr) {
     return {};
@@ -67,43 +68,27 @@ template <typename... Args> std::string FmtStr(const char* fmt, const Args&... a
       storage);
 }
 
-inline std::string FormatSize(uint64_t bytes) {
-  if (bytes >= 1024ULL * 1024 * 1024)
-    return FmtStr("%.1f GB", bytes / (1024.0 * 1024 * 1024));
-  if (bytes >= 1024ULL * 1024)
-    return FmtStr("%.1f MB", bytes / (1024.0 * 1024));
-  if (bytes >= 1024)
-    return FmtStr("%.1f KB", bytes / 1024.0);
-  return FmtStr("%llu B", (unsigned long long)bytes);
-}
+// =========================================================================
+// 2. Trimming (Zero-Copy)
+// =========================================================================
 
-constexpr bool IsAsciiWhitespace(char c) noexcept {
-  return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-}
-
-inline std::string_view TrimAsciiWhitespaceView(std::string_view text) noexcept {
-  size_t begin = 0;
-  while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin]))) {
-    begin++;
+[[nodiscard]] inline std::string_view Trim(std::string_view text) noexcept {
+  const auto not_ws = [](char c) noexcept -> bool {
+    return std::isspace(static_cast<unsigned char>(c)) == 0;
+  };
+  const auto* const start = std::ranges::find_if(text, not_ws);
+  if (start == text.end()) {
+    return {};
   }
-  size_t end = text.size();
-  while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1]))) {
-    end--;
-  }
-  return text.substr(begin, end - begin);
+  const auto rstart = std::ranges::find_if(text | std::views::reverse, not_ws);
+  const auto begin_idx = static_cast<size_t>(start - text.begin());
+  const auto end_idx = static_cast<size_t>(text.rend() - rstart);
+  return text.substr(begin_idx, end_idx - begin_idx);
 }
 
-inline std::string TrimAsciiWhitespace(std::string_view text) {
-  return std::string(TrimAsciiWhitespaceView(text));
-}
-
-[[nodiscard]] constexpr std::string_view StripPrefix(std::string_view text,
-                                                     std::string_view prefix) noexcept {
-  if (text.starts_with(prefix)) {
-    return text.substr(prefix.size());
-  }
-  return text;
-}
+// =========================================================================
+// 3. Affixes (Prefix & Suffix)
+// =========================================================================
 
 [[nodiscard]] constexpr std::string_view StripSuffix(std::string_view text,
                                                      std::string_view suffix) noexcept {
@@ -121,105 +106,11 @@ constexpr bool ConsumePrefix(std::string_view* text, std::string_view prefix) no
   return false;
 }
 
-inline std::optional<std::pair<std::string_view, std::string_view>>
-SplitPair(std::string_view text, char delimiter, bool trim_whitespace = false) noexcept {
-  const size_t pos = text.find(delimiter);
-  if (pos == std::string_view::npos) {
-    return std::nullopt;
-  }
-  std::string_view first = text.substr(0, pos);
-  std::string_view second = text.substr(pos + 1);
-  if (trim_whitespace) {
-    first = TrimAsciiWhitespaceView(first);
-    second = TrimAsciiWhitespaceView(second);
-  }
-  return std::make_pair(first, second);
-}
+// =========================================================================
+// 4. Splitting
+// =========================================================================
 
-inline std::optional<std::pair<std::string_view, std::string_view>>
-SplitPair(std::string_view text, std::string_view delimiter,
-          bool trim_whitespace = false) noexcept {
-  if (delimiter.empty()) {
-    return std::nullopt;
-  }
-  const size_t pos = text.find(delimiter);
-  if (pos == std::string_view::npos) {
-    return std::nullopt;
-  }
-  std::string_view first = text.substr(0, pos);
-  std::string_view second = text.substr(pos + delimiter.size());
-  if (trim_whitespace) {
-    first = TrimAsciiWhitespaceView(first);
-    second = TrimAsciiWhitespaceView(second);
-  }
-  return std::make_pair(first, second);
-}
-
-inline std::optional<std::pair<std::string_view, std::string_view>>
-SplitPairRight(std::string_view text, char delimiter, bool trim_whitespace = false) noexcept {
-  const size_t pos = text.rfind(delimiter);
-  if (pos == std::string_view::npos) {
-    return std::nullopt;
-  }
-  std::string_view first = text.substr(0, pos);
-  std::string_view second = text.substr(pos + 1);
-  if (trim_whitespace) {
-    first = TrimAsciiWhitespaceView(first);
-    second = TrimAsciiWhitespaceView(second);
-  }
-  return std::make_pair(first, second);
-}
-
-inline char ToLowerAsciiChar(char ch) noexcept {
-  if (ch >= 'A' && ch <= 'Z') {
-    return static_cast<char>(ch - 'A' + 'a');
-  }
-  return ch;
-}
-
-inline char ToUpperAsciiChar(char ch) noexcept {
-  if (ch >= 'a' && ch <= 'z') {
-    return static_cast<char>(ch - 'a' + 'A');
-  }
-  return ch;
-}
-
-inline std::string ToLowerAscii(std::string_view text) {
-  std::string result;
-  result.reserve(text.size());
-  for (const char ch : text) {
-    result.push_back(ToLowerAsciiChar(ch));
-  }
-  return result;
-}
-
-inline std::string ToUpperAscii(std::string_view text) {
-  std::string result;
-  result.reserve(text.size());
-  for (const char ch : text) {
-    result.push_back(ToUpperAsciiChar(ch));
-  }
-  return result;
-}
-
-inline bool EqualsIgnoreCase(std::string_view a, std::string_view b) noexcept {
-  if (a.size() != b.size()) {
-    return false;
-  }
-  for (size_t i = 0; i < a.size(); ++i) {
-    if (ToLowerAsciiChar(a[i]) != ToLowerAsciiChar(b[i])) {
-      return false;
-    }
-  }
-  return true;
-}
-
-[[nodiscard]] inline bool StartsWithIgnoreCase(std::string_view text,
-                                               std::string_view prefix) noexcept {
-  return text.size() >= prefix.size() && EqualsIgnoreCase(text.substr(0, prefix.size()), prefix);
-}
-
-inline std::vector<std::string_view> SplitByChar(std::string_view text, char delim) {
+inline std::vector<std::string_view> Split(std::string_view text, char delim) {
   std::vector<std::string_view> tokens;
   size_t start = 0;
   while (start <= text.size()) {
@@ -253,52 +144,27 @@ inline std::vector<std::string_view> SplitLines(std::string_view text) {
   return lines;
 }
 
-template <typename Callback>
-inline void DrainLinesFromBuffer(std::string& buffer, Callback on_line, bool flush_tail = false) {
-  size_t processed = 0;
-  size_t start = 0;
-  bool should_stop = false;
-
-  while (start < buffer.size()) {
-    const size_t end = buffer.find('\n', start);
-    if (end == std::string::npos) {
-      break;
-    }
-    size_t len = end - start;
-    if (len > 0 && buffer[start + len - 1] == '\r') {
-      --len;
-    }
-    const std::string_view line(buffer.data() + start, len);
-    start = end + 1;
-    processed = start;
-
-    if constexpr (std::is_void_v<std::invoke_result_t<Callback, std::string_view>>) {
-      on_line(line);
-    } else {
-      if (!static_cast<bool>(on_line(line))) {
-        should_stop = true;
-        break;
-      }
-    }
+inline std::optional<std::pair<std::string_view, std::string_view>>
+SplitOnce(std::string_view text, char delimiter) noexcept {
+  const size_t pos = text.find(delimiter);
+  if (pos == std::string_view::npos) {
+    return std::nullopt;
   }
-
-  if (processed > 0) {
-    buffer.erase(0, processed);
-  }
-
-  if (flush_tail && !should_stop && !buffer.empty()) {
-    std::string_view tail(buffer);
-    if (!tail.empty() && tail.back() == '\r') {
-      tail.remove_suffix(1);
-    }
-    if constexpr (std::is_void_v<std::invoke_result_t<Callback, std::string_view>>) {
-      on_line(tail);
-    } else {
-      (void)on_line(tail);
-    }
-    buffer.clear();
-  }
+  return std::make_pair(text.substr(0, pos), text.substr(pos + 1));
 }
+
+inline std::optional<std::pair<std::string_view, std::string_view>>
+RSplitOnce(std::string_view text, char delimiter) noexcept {
+  const size_t pos = text.rfind(delimiter);
+  if (pos == std::string_view::npos) {
+    return std::nullopt;
+  }
+  return std::make_pair(text.substr(0, pos), text.substr(pos + 1));
+}
+
+// =========================================================================
+// 5. Joining
+// =========================================================================
 
 template <typename Container>
 inline std::string Join(const Container& elements, std::string_view delimiter) {
@@ -373,431 +239,20 @@ inline std::string JoinKeyValue(const MapContainer& map, std::string_view item_d
   return result;
 }
 
-inline std::string MaskSecret(std::string_view secret, size_t head_keep = 4, size_t tail_keep = 4,
-                              char mask_char = '*') {
-  if (secret.empty()) {
-    return {};
-  }
-  if (tail_keep >= secret.size() || head_keep >= secret.size() - tail_keep) {
-    std::string masked(secret.size(), mask_char);
-    return masked;
-  }
-  std::string result;
-  result.reserve(secret.size());
-  result.append(secret.substr(0, head_keep));
-  result.append(secret.size() - head_keep - tail_keep, mask_char);
-  result.append(secret.substr(secret.size() - tail_keep));
-  return result;
+// =========================================================================
+// 6. Comparison (Case-Insensitive)
+// =========================================================================
+
+inline bool EqualsIgnoreCase(std::string_view a, std::string_view b) noexcept {
+  return std::ranges::equal(a, b, [](char ca, char cb) noexcept {
+    return std::tolower(static_cast<unsigned char>(ca)) ==
+           std::tolower(static_cast<unsigned char>(cb));
+  });
 }
 
-inline std::string Base64Encode(std::span<const std::byte> data) {
-  static constexpr std::string_view kTable =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  std::string result;
-  result.reserve(((data.size() + 2) / 3) * 4);
-  for (size_t i = 0; i < data.size(); i += 3) {
-    const auto b0 = static_cast<unsigned int>(data[i]);
-    const auto b1 = (i + 1 < data.size()) ? static_cast<unsigned int>(data[i + 1]) : 0;
-    const auto b2 = (i + 2 < data.size()) ? static_cast<unsigned int>(data[i + 2]) : 0;
-    const unsigned int triple = (b0 << 16) | (b1 << 8) | b2;
-    result.push_back(kTable[(triple >> 18) & 0x3F]);
-    result.push_back(kTable[(triple >> 12) & 0x3F]);
-    result.push_back((i + 1 < data.size()) ? kTable[(triple >> 6) & 0x3F] : '=');
-    result.push_back((i + 2 < data.size()) ? kTable[triple & 0x3F] : '=');
-  }
-  return result;
-}
-
-inline std::string Base64Encode(std::string_view text) {
-  const auto bytes = std::as_bytes(std::span(text.data(), text.size()));
-  return Base64Encode(bytes);
-}
-
-inline std::string Base64Encode(const char* data, size_t size) {
-  if (data == nullptr || size == 0) {
-    return {};
-  }
-  return Base64Encode(std::string_view(data, size));
-}
-
-inline std::string Base64Encode(const unsigned char* data, size_t size) {
-  if (data == nullptr || size == 0) {
-    return {};
-  }
-  const auto bytes = std::as_bytes(std::span<const unsigned char>(data, size));
-  return Base64Encode(bytes);
-}
-
-inline bool IsCjkCodepoint(uint32_t cp) {
-  return cp >= 0x2E80;
-}
-
-inline uint32_t FirstUtf8Codepoint(std::string_view s) {
-  if (s.empty())
-    return 0;
-  auto c = static_cast<unsigned char>(s[0]);
-  if (c < 0x80)
-    return c;
-  uint32_t cp = 0;
-  int len = 0;
-  if ((c & 0xE0) == 0xC0) {
-    cp = c & 0x1F;
-    len = 2;
-  } else if ((c & 0xF0) == 0xE0) {
-    cp = c & 0x0F;
-    len = 3;
-  } else if ((c & 0xF8) == 0xF0) {
-    cp = c & 0x07;
-    len = 4;
-  } else {
-    return c;
-  }
-  for (int i = 1; i < len && static_cast<size_t>(i) < s.size(); ++i) {
-    cp = (cp << 6) | (static_cast<unsigned char>(s[i]) & 0x3F);
-  }
-  return cp;
-}
-
-inline uint32_t LastUtf8Codepoint(std::string_view s) {
-  if (s.empty())
-    return 0;
-  auto i = s.size();
-  while (i > 0 && (static_cast<unsigned char>(s[i - 1]) & 0xC0) == 0x80) {
-    --i;
-  }
-  if (i == 0)
-    return 0;
-  return FirstUtf8Codepoint(s.substr(i - 1));
-}
-
-inline bool IsSentenceEndingPunctuation(uint32_t cp) {
-  // CJK sentence enders: 。！？…
-  if (cp == 0x3002 || cp == 0xFF01 || cp == 0xFF1F || cp == 0x2026)
-    return true;
-  // Latin sentence enders
-  if (cp == '.' || cp == '!' || cp == '?')
-    return true;
-  if (cp == '\n')
-    return true;
-  return false;
-}
-
-inline size_t Utf8CodepointWidth(uint32_t codepoint) {
-  if (codepoint == 0) {
-    return 0;
-  }
-  // Control characters & zero-width
-  if (codepoint < 32 || (codepoint >= 0x7F && codepoint < 0xA0) || codepoint == 0x200B ||
-      codepoint == 0x200C || codepoint == 0x200D || codepoint == 0xFEFF) {
-    return 0;
-  }
-  // CJK, Fullwidth forms, Wide symbols, and Emoji ranges
-  if ((codepoint >= 0x1100 && codepoint <= 0x115F) ||   // Hangul Jamo
-      (codepoint >= 0x2E80 && codepoint <= 0x9FFF) ||   // CJK Radicals, Punctuation, Ideographs
-      (codepoint >= 0xAC00 && codepoint <= 0xD7A3) ||   // Hangul Syllables
-      (codepoint >= 0xF900 && codepoint <= 0xFAFF) ||   // CJK Compatibility Ideographs
-      (codepoint >= 0xFE10 && codepoint <= 0xFE19) ||   // Vertical forms
-      (codepoint >= 0xFE30 && codepoint <= 0xFE6F) ||   // CJK Compatibility Forms
-      (codepoint >= 0xFF00 && codepoint <= 0xFF60) ||   // Fullwidth Forms
-      (codepoint >= 0xFFE0 && codepoint <= 0xFFE6) ||   // Fullwidth Symbols
-      (codepoint >= 0x1F000 && codepoint <= 0x1FAFF) || // Miscellaneous Symbols & Emojis
-      (codepoint >= 0x20000 && codepoint <= 0x2FA1F) || // CJK Unified Ideographs Extension
-      (codepoint >= 0x30000 && codepoint <= 0x3134F)) {
-    return 2;
-  }
-  return 1;
-}
-
-inline uint32_t NextUtf8Codepoint(std::string_view text, size_t& offset) {
-  if (offset >= text.size()) {
-    return 0;
-  }
-  const auto c = static_cast<unsigned char>(text[offset]);
-  uint32_t codepoint = 0;
-  size_t len = 1;
-  if (c < 0x80) {
-    codepoint = c;
-    len = 1;
-  } else if ((c & 0xE0) == 0xC0) {
-    codepoint = c & 0x1F;
-    len = 2;
-  } else if ((c & 0xF0) == 0xE0) {
-    codepoint = c & 0x0F;
-    len = 3;
-  } else if ((c & 0xF8) == 0xF0) {
-    codepoint = c & 0x07;
-    len = 4;
-  } else {
-    offset += 1;
-    return c;
-  }
-  for (size_t i = 1; i < len && offset + i < text.size(); ++i) {
-    codepoint = (codepoint << 6) | (static_cast<unsigned char>(text[offset + i]) & 0x3F);
-  }
-  offset += len;
-  return codepoint;
-}
-
-inline size_t Utf8VisualWidth(std::string_view text) {
-  size_t width = 0;
-  size_t offset = 0;
-  while (offset < text.size()) {
-    const uint32_t codepoint = NextUtf8Codepoint(text, offset);
-    width += Utf8CodepointWidth(codepoint);
-  }
-  return width;
-}
-
-inline std::string TruncateMiddleUtf8(std::string_view text, size_t max_width,
-                                      std::string_view ellipsis = "...") {
-  if (max_width == 0) {
-    return std::string(text);
-  }
-
-  const size_t total_width = Utf8VisualWidth(text);
-  if (total_width <= max_width) {
-    return std::string(text);
-  }
-
-  const size_t ellipsis_width = Utf8VisualWidth(ellipsis);
-  if (max_width <= ellipsis_width + 4) {
-    const size_t tail_budget = max_width;
-    size_t index = text.size();
-    size_t current_width = 0;
-    while (index > 0) {
-      size_t prev_index = index - 1;
-      while (prev_index > 0 && (static_cast<unsigned char>(text[prev_index]) & 0xC0) == 0x80) {
-        --prev_index;
-      }
-      const uint32_t codepoint = FirstUtf8Codepoint(text.substr(prev_index));
-      const size_t cp_width = Utf8CodepointWidth(codepoint);
-      if (current_width + cp_width > tail_budget) {
-        break;
-      }
-      current_width += cp_width;
-      index = prev_index;
-    }
-    return std::string(text.substr(index));
-  }
-
-  const size_t available_content_width = max_width - ellipsis_width;
-  size_t target_head_width = std::max<size_t>(6, std::min<size_t>(14, available_content_width / 4));
-  if (target_head_width >= available_content_width) {
-    target_head_width = available_content_width / 2;
-  }
-  const size_t target_tail_width = available_content_width - target_head_width;
-
-  size_t head_byte_len = 0;
-  size_t head_cur_width = 0;
-  size_t offset = 0;
-  while (offset < text.size()) {
-    size_t next_offset = offset;
-    const uint32_t codepoint = NextUtf8Codepoint(text, next_offset);
-    const size_t cp_width = Utf8CodepointWidth(codepoint);
-    if (head_cur_width + cp_width > target_head_width) {
-      break;
-    }
-    head_cur_width += cp_width;
-    offset = next_offset;
-    head_byte_len = offset;
-  }
-
-  size_t tail_start_offset = text.size();
-  size_t tail_cur_width = 0;
-  size_t index = text.size();
-  while (index > head_byte_len) {
-    size_t prev_index = index - 1;
-    while (prev_index > 0 && (static_cast<unsigned char>(text[prev_index]) & 0xC0) == 0x80) {
-      --prev_index;
-    }
-    const uint32_t codepoint = FirstUtf8Codepoint(text.substr(prev_index));
-    const size_t cp_width = Utf8CodepointWidth(codepoint);
-    if (tail_cur_width + cp_width > target_tail_width) {
-      break;
-    }
-    tail_cur_width += cp_width;
-    index = prev_index;
-    tail_start_offset = index;
-  }
-
-  std::string result;
-  result.reserve(head_byte_len + ellipsis.size() + (text.size() - tail_start_offset));
-  result.append(text.substr(0, head_byte_len));
-  result.append(ellipsis);
-  result.append(text.substr(tail_start_offset));
-  return result;
-}
-
-inline std::string_view TruncateUtf8Bytes(std::string_view text, size_t max_bytes) noexcept {
-  size_t i = 0;
-  size_t last_valid = 0;
-  const size_t n = text.size();
-  while (i < n) {
-    const auto c0 = static_cast<unsigned char>(text[i]);
-    size_t len = 0;
-    if (c0 <= 0x7F) {
-      len = 1;
-    } else if (c0 >= 0xC2 && c0 <= 0xDF) {
-      if (i + 1 >= n) {
-        break;
-      }
-      const auto c1 = static_cast<unsigned char>(text[i + 1]);
-      if ((c1 & 0xC0) != 0x80) {
-        break;
-      }
-      len = 2;
-    } else if (c0 >= 0xE0 && c0 <= 0xEF) {
-      if (i + 2 >= n) {
-        break;
-      }
-      const auto c1 = static_cast<unsigned char>(text[i + 1]);
-      const auto c2 = static_cast<unsigned char>(text[i + 2]);
-      if ((c1 & 0xC0) != 0x80 || (c2 & 0xC0) != 0x80) {
-        break;
-      }
-      if (c0 == 0xE0 && c1 < 0xA0) {
-        break;
-      }
-      if (c0 == 0xED && c1 >= 0xA0) {
-        break;
-      }
-      len = 3;
-    } else if (c0 >= 0xF0 && c0 <= 0xF4) {
-      if (i + 3 >= n) {
-        break;
-      }
-      const auto c1 = static_cast<unsigned char>(text[i + 1]);
-      const auto c2 = static_cast<unsigned char>(text[i + 2]);
-      const auto c3 = static_cast<unsigned char>(text[i + 3]);
-      if ((c1 & 0xC0) != 0x80 || (c2 & 0xC0) != 0x80 || (c3 & 0xC0) != 0x80) {
-        break;
-      }
-      if (c0 == 0xF0 && c1 < 0x90) {
-        break;
-      }
-      if (c0 == 0xF4 && c1 > 0x8F) {
-        break;
-      }
-      len = 4;
-    } else {
-      break;
-    }
-
-    if (i + len > max_bytes) {
-      break;
-    }
-    i += len;
-    last_valid = i;
-  }
-  return text.substr(0, last_valid);
-}
-
-inline bool ParseFloatStrict(std::string_view value, float* out = nullptr) noexcept {
-  if (value.empty()) {
-    return false;
-  }
-  std::string_view sv = value;
-  bool is_negative = false;
-  if (sv.starts_with('+')) {
-    sv.remove_prefix(1);
-    if (sv.empty() || sv.starts_with('+') || sv.starts_with('-')) {
-      return false;
-    }
-  } else if (sv.starts_with('-')) {
-    is_negative = true;
-    sv.remove_prefix(1);
-    if (sv.empty() || sv.starts_with('+') || sv.starts_with('-')) {
-      return false;
-    }
-  }
-  std::chars_format fmt = std::chars_format::general;
-  if (sv.starts_with("0x") || sv.starts_with("0X")) {
-    sv.remove_prefix(2);
-    fmt = std::chars_format::hex;
-  }
-  float val = 0.0F;
-  const auto [ptr, ec] = std::from_chars(sv.data(), sv.data() + sv.size(), val, fmt);
-  if (ec != std::errc{} || ptr != sv.data() + sv.size() || !std::isfinite(val)) {
-    return false;
-  }
-  if (is_negative) {
-    val = -val;
-  }
-  if (out != nullptr) {
-    *out = val;
-  }
-  return true;
-}
-
-struct Utf8ValidationResult {
-  bool valid = true;
-  size_t error_offset = 0;
-  const char* error_reason = nullptr;
-};
-
-inline Utf8ValidationResult ValidateUtf8Text(std::string_view text, bool allow_control_chars = true,
-                                             bool allow_embedded_nul = true) noexcept {
-  size_t offset = 0;
-  while (offset < text.size()) {
-    const auto first = static_cast<unsigned char>(text[offset]);
-    size_t length = 0;
-    uint32_t codepoint = 0;
-    if (first <= 0x7f) {
-      length = 1;
-      codepoint = first;
-    } else if (first >= 0xc2 && first <= 0xdf) {
-      length = 2;
-      codepoint = first & 0x1f;
-    } else if (first >= 0xe0 && first <= 0xef) {
-      length = 3;
-      codepoint = first & 0x0f;
-    } else if (first >= 0xf0 && first <= 0xf4) {
-      length = 4;
-      codepoint = first & 0x07;
-    } else {
-      return {false, offset, "invalid UTF-8 leading byte"};
-    }
-
-    if (length > text.size() - offset) {
-      return {false, offset, "truncated UTF-8 sequence"};
-    }
-    for (size_t i = 1; i < length; ++i) {
-      const auto continuation = static_cast<unsigned char>(text[offset + i]);
-      if ((continuation & 0xc0) != 0x80) {
-        return {false, offset + i, "invalid UTF-8 continuation byte"};
-      }
-      codepoint = (codepoint << 6) | (continuation & 0x3f);
-    }
-
-    const bool overlong = (length == 2 && codepoint < 0x80) || (length == 3 && codepoint < 0x800) ||
-                          (length == 4 && codepoint < 0x10000);
-    if (overlong) {
-      return {false, offset, "overlong UTF-8 sequence"};
-    }
-    if (codepoint >= 0xd800 && codepoint <= 0xdfff) {
-      return {false, offset, "UTF-8 encodes a surrogate code point"};
-    }
-    if (codepoint > 0x10ffff) {
-      return {false, offset, "UTF-8 code point exceeds U+10FFFF"};
-    }
-    if (!allow_embedded_nul && codepoint == 0) {
-      return {false, offset, "embedded NUL is not allowed"};
-    }
-    if (!allow_control_chars) {
-      const bool permitted_ascii_whitespace =
-          codepoint == '\t' || codepoint == '\n' || codepoint == '\r';
-      if ((!permitted_ascii_whitespace && codepoint < 0x20) ||
-          (codepoint >= 0x7f && codepoint <= 0x9f)) {
-        return {false, offset, "control character is not allowed"};
-      }
-    }
-    offset += length;
-  }
-  return {true, 0, nullptr};
-}
-
-inline bool IsValidUtf8(std::string_view text) noexcept {
-  return ValidateUtf8Text(text, /*allow_control_chars=*/true, /*allow_embedded_nul=*/true).valid;
+[[nodiscard]] inline bool StartsWithIgnoreCase(std::string_view text,
+                                               std::string_view prefix) noexcept {
+  return text.size() >= prefix.size() && EqualsIgnoreCase(text.substr(0, prefix.size()), prefix);
 }
 
 } // namespace vinput::str

@@ -1,6 +1,5 @@
 #include <cstdio>
 #include <cstdlib>
-#include <limits>
 #include <map>
 #include <set>
 #include <span>
@@ -20,52 +19,31 @@ inline void AssertTrue(bool condition, const char* message, const char* file, in
 
 #define TEST_ASSERT(cond) AssertTrue((cond), #cond, __FILE__, __LINE__)
 
-void TestTrimAsciiWhitespace() {
-  using vinput::str::TrimAsciiWhitespace;
-  using vinput::str::TrimAsciiWhitespaceView;
+void TestTrim() {
+  using vinput::str::Trim;
 
   // Empty string
-  TEST_ASSERT(TrimAsciiWhitespace("").empty());
-  TEST_ASSERT(TrimAsciiWhitespaceView("").empty());
+  TEST_ASSERT(Trim("").empty());
 
   // Pure whitespace
-  TEST_ASSERT(TrimAsciiWhitespace("   \t\r\n ").empty());
-  TEST_ASSERT(TrimAsciiWhitespaceView("   \t\r\n ").empty());
+  TEST_ASSERT(Trim("   \t\r\n ").empty());
 
   // Leading and trailing whitespace
-  TEST_ASSERT(TrimAsciiWhitespace("  hello world  \n") == "hello world");
-  TEST_ASSERT(TrimAsciiWhitespaceView("  hello world  \n") == "hello world");
-  TEST_ASSERT(TrimAsciiWhitespace("\t\tvinput\r") == "vinput");
+  TEST_ASSERT(Trim("  hello world  \n") == "hello world");
+  TEST_ASSERT(Trim("\t\tvinput\r") == "vinput");
 
   // No whitespace to trim
-  TEST_ASSERT(TrimAsciiWhitespace("abc") == "abc");
-  TEST_ASSERT(TrimAsciiWhitespaceView("abc") == "abc");
+  TEST_ASSERT(Trim("abc") == "abc");
 
   // Zero-copy check: returned string_view points inside original buffer
   const std::string_view original = "  inner text  ";
-  const std::string_view trimmed = TrimAsciiWhitespaceView(original);
+  const std::string_view trimmed = Trim(original);
   TEST_ASSERT(trimmed == "inner text");
   TEST_ASSERT(trimmed.data() == original.data() + 2);
 
-  // Return std::string check
-  const std::string string_res = TrimAsciiWhitespace("  to string test  ");
+  // Owning copy is built by the caller
+  const std::string string_res(Trim("  to string test  "));
   TEST_ASSERT(string_res == "to string test");
-}
-
-void TestToLowerAndToUpperAscii() {
-  using vinput::str::ToLowerAscii;
-  using vinput::str::ToUpperAscii;
-
-  TEST_ASSERT(ToLowerAscii("").empty());
-  TEST_ASSERT(ToLowerAscii("Hello, World! 123") == "hello, world! 123");
-  TEST_ASSERT(ToLowerAscii("FCITX5-VINPUT") == "fcitx5-vinput");
-  // Strict ASCII-only case folding: I <-> i regardless of system locale
-  TEST_ASSERT(ToLowerAscii("AUTHORIZATION") == "authorization");
-
-  TEST_ASSERT(ToUpperAscii("").empty());
-  TEST_ASSERT(ToUpperAscii("Hello, World! 123") == "HELLO, WORLD! 123");
-  TEST_ASSERT(ToUpperAscii("fcitx5-vinput") == "FCITX5-VINPUT");
-  TEST_ASSERT(ToUpperAscii("authorization") == "AUTHORIZATION");
 }
 
 void TestEqualsIgnoreCase() {
@@ -79,19 +57,19 @@ void TestEqualsIgnoreCase() {
   TEST_ASSERT(!EqualsIgnoreCase("hello", "world"));
 }
 
-void TestSplitByChar() {
-  using vinput::str::SplitByChar;
+void TestSplit() {
+  using vinput::str::Split;
 
   // Single segment
-  const auto res1 = SplitByChar("hello", '.');
+  const auto res1 = Split("hello", '.');
   TEST_ASSERT(res1.size() == 1 && res1[0] == "hello");
 
   // Multiple segments
-  const auto res2 = SplitByChar("a.b.c", '.');
+  const auto res2 = Split("a.b.c", '.');
   TEST_ASSERT(res2.size() == 3 && res2[0] == "a" && res2[1] == "b" && res2[2] == "c");
 
   // Leading, trailing, consecutive delimiters
-  const auto res3 = SplitByChar("/usr/local/bin/", '/');
+  const auto res3 = Split("/usr/local/bin/", '/');
   TEST_ASSERT(res3.size() == 5);
   TEST_ASSERT(res3[0].empty());
   TEST_ASSERT(res3[1] == "usr");
@@ -100,7 +78,7 @@ void TestSplitByChar() {
   TEST_ASSERT(res3[4].empty());
 
   // Empty string
-  const auto res4 = SplitByChar("", ',');
+  const auto res4 = Split("", ',');
   TEST_ASSERT(res4.size() == 1 && res4[0].empty());
 }
 
@@ -122,48 +100,6 @@ void TestSplitLines() {
   // Single line without newline
   const auto res4 = SplitLines("single");
   TEST_ASSERT(res4.size() == 1 && res4[0] == "single");
-}
-
-void TestBase64Encode() {
-  using vinput::str::Base64Encode;
-
-  // RFC 4648 test vectors
-  TEST_ASSERT(Base64Encode("").empty());
-  TEST_ASSERT(Base64Encode("f") == "Zg==");
-  TEST_ASSERT(Base64Encode("fo") == "Zm8=");
-  TEST_ASSERT(Base64Encode("foo") == "Zm9v");
-  TEST_ASSERT(Base64Encode("foob") == "Zm9vYg==");
-  TEST_ASSERT(Base64Encode("fooba") == "Zm9vYmE=");
-  TEST_ASSERT(Base64Encode("foobar") == "Zm9vYmFy");
-
-  // Raw unsigned char pointer test
-  const unsigned char data[] = {'H', 'e', 'l', 'l', 'o'};
-  TEST_ASSERT(Base64Encode(data, sizeof(data)) == "SGVsbG8=");
-  TEST_ASSERT(Base64Encode(static_cast<const unsigned char*>(nullptr), 0).empty());
-
-  // Raw const char pointer test
-  const char char_data[] = "Hello";
-  TEST_ASSERT(Base64Encode(char_data, sizeof(char_data) - 1) == "SGVsbG8=");
-  TEST_ASSERT(Base64Encode(static_cast<const char*>(nullptr), 0).empty());
-}
-
-void TestStripPrefix() {
-  using vinput::str::StripPrefix;
-
-  // Normal prefix stripping
-  TEST_ASSERT(StripPrefix("Bearer 123456", "Bearer ") == "123456");
-  TEST_ASSERT(StripPrefix("prefix_text", "prefix_") == "text");
-
-  // Non-matching prefix
-  TEST_ASSERT(StripPrefix("Basic 123456", "Bearer ") == "Basic 123456");
-  TEST_ASSERT(StripPrefix("hello", "world") == "hello");
-
-  // Boundary cases
-  TEST_ASSERT(StripPrefix("", "").empty());
-  TEST_ASSERT(StripPrefix("", "prefix").empty());
-  TEST_ASSERT(StripPrefix("text", "") == "text");
-  TEST_ASSERT(StripPrefix("exact_match", "exact_match").empty());
-  TEST_ASSERT(StripPrefix("short", "longer_prefix") == "short");
 }
 
 void TestStripSuffix() {
@@ -213,109 +149,54 @@ void TestConsumePrefix() {
   TEST_ASSERT(sv4.empty());
 }
 
-void TestSplitPair() {
-  using vinput::str::SplitPair;
+void TestSplitOnce() {
+  using vinput::str::SplitOnce;
 
   // Normal char delimiter
-  const auto pair1 = SplitPair("KEY=VALUE", '=');
+  const auto pair1 = SplitOnce("KEY=VALUE", '=');
   TEST_ASSERT(pair1.has_value());
   if (pair1.has_value()) {
     TEST_ASSERT(pair1->first == "KEY" && pair1->second == "VALUE");
   }
 
-  // Delimiter with whitespace and trim_whitespace = true
-  const auto pair2 = SplitPair("  host : 127.0.0.1\t", ':', /*trim_whitespace=*/true);
-  TEST_ASSERT(pair2.has_value());
-  if (pair2.has_value()) {
-    TEST_ASSERT(pair2->first == "host" && pair2->second == "127.0.0.1");
-  }
-
-  // Delimiter with whitespace and trim_whitespace = false
-  const auto pair3 = SplitPair("  host : 127.0.0.1\t", ':', /*trim_whitespace=*/false);
-  TEST_ASSERT(pair3.has_value());
-  if (pair3.has_value()) {
-    TEST_ASSERT(pair3->first == "  host " && pair3->second == " 127.0.0.1\t");
-  }
-
   // No delimiter
-  TEST_ASSERT(!SplitPair("NO_DELIM", '=').has_value());
-  TEST_ASSERT(!SplitPair("", '=').has_value());
+  TEST_ASSERT(!SplitOnce("NO_DELIM", '=').has_value());
+  TEST_ASSERT(!SplitOnce("", '=').has_value());
 
   // Leading and trailing delimiter
-  const auto pair4 = SplitPair("=VALUE", '=');
-  TEST_ASSERT(pair4.has_value());
-  if (pair4.has_value()) {
-    TEST_ASSERT(pair4->first.empty() && pair4->second == "VALUE");
+  const auto pair2 = SplitOnce("=VALUE", '=');
+  TEST_ASSERT(pair2.has_value());
+  if (pair2.has_value()) {
+    TEST_ASSERT(pair2->first.empty() && pair2->second == "VALUE");
   }
 
-  const auto pair5 = SplitPair("KEY=", '=');
-  TEST_ASSERT(pair5.has_value());
-  if (pair5.has_value()) {
-    TEST_ASSERT(pair5->first == "KEY" && pair5->second.empty());
+  const auto pair3 = SplitOnce("KEY=", '=');
+  TEST_ASSERT(pair3.has_value());
+  if (pair3.has_value()) {
+    TEST_ASSERT(pair3->first == "KEY" && pair3->second.empty());
   }
 
   // Multiple consecutive delimiters: split on first delimiter only
-  const auto pair6 = SplitPair("a=b=c", '=');
-  TEST_ASSERT(pair6.has_value());
-  if (pair6.has_value()) {
-    TEST_ASSERT(pair6->first == "a" && pair6->second == "b=c");
-  }
-
-  // String_view delimiter
-  const auto pair7 = SplitPair("key::value", "::");
-  TEST_ASSERT(pair7.has_value());
-  if (pair7.has_value()) {
-    TEST_ASSERT(pair7->first == "key" && pair7->second == "value");
-  }
-
-  // Empty string_view delimiter -> nullopt
-  TEST_ASSERT(!SplitPair("key::value", "").has_value());
-
-  // Non-matching string_view delimiter
-  TEST_ASSERT(!SplitPair("key:value", "::").has_value());
-
-  // String_view delimiter with trim
-  const auto pair8 = SplitPair(" key --> value ", "-->", /*trim_whitespace=*/true);
-  TEST_ASSERT(pair8.has_value());
-  if (pair8.has_value()) {
-    TEST_ASSERT(pair8->first == "key" && pair8->second == "value");
+  const auto pair4 = SplitOnce("a=b=c", '=');
+  TEST_ASSERT(pair4.has_value());
+  if (pair4.has_value()) {
+    TEST_ASSERT(pair4->first == "a" && pair4->second == "b=c");
   }
 }
 
-void TestSplitPairRight() {
-  using vinput::str::SplitPairRight;
+void TestRSplitOnce() {
+  using vinput::str::RSplitOnce;
 
   // Split on rightmost delimiter
-  const auto pair1 = SplitPairRight("a:b:c", ':');
+  const auto pair1 = RSplitOnce("a:b:c", ':');
   TEST_ASSERT(pair1.has_value());
   if (pair1.has_value()) {
     TEST_ASSERT(pair1->first == "a:b" && pair1->second == "c");
   }
 
-  // Hotword score pattern
-  const auto pair2 = SplitPairRight("alpha:beta:3.5", ':');
-  TEST_ASSERT(pair2.has_value());
-  if (pair2.has_value()) {
-    TEST_ASSERT(pair2->first == "alpha:beta" && pair2->second == "3.5");
-  }
-
-  // Trim whitespace
-  const auto pair3 = SplitPairRight("  foo:bar  :  10  ", ':', /*trim_whitespace=*/true);
-  TEST_ASSERT(pair3.has_value());
-  if (pair3.has_value()) {
-    TEST_ASSERT(pair3->first == "foo:bar" && pair3->second == "10");
-  }
-
-  // Without trim whitespace
-  const auto pair4 = SplitPairRight("  foo:bar  :  10  ", ':', /*trim_whitespace=*/false);
-  TEST_ASSERT(pair4.has_value());
-  if (pair4.has_value()) {
-    TEST_ASSERT(pair4->first == "  foo:bar  " && pair4->second == "  10  ");
-  }
-
   // No delimiter present
-  TEST_ASSERT(!SplitPairRight("no_delim", ':').has_value());
-  TEST_ASSERT(!SplitPairRight("", ':').has_value());
+  TEST_ASSERT(!RSplitOnce("no_delim", ':').has_value());
+  TEST_ASSERT(!RSplitOnce("", ':').has_value());
 }
 
 void TestJoin() {
@@ -376,314 +257,15 @@ void TestJoinKeyValue() {
   TEST_ASSERT(JoinKeyValue(pair_list, "&", "=") == "=val&key=");
 }
 
-void TestMaskSecret() {
-  using vinput::str::MaskSecret;
-
-  // Normal key (length 24)
-  TEST_ASSERT(MaskSecret("sk-proj-1234567890abcdef") == "sk-p****************cdef");
-
-  // Critical length: exactly head_keep + tail_keep (8) -> completely masked
-  TEST_ASSERT(MaskSecret("12345678") == "********");
-
-  // Length 9: head 4, mask 1, tail 4
-  TEST_ASSERT(MaskSecret("123456789") == "1234*6789");
-
-  // Extremely short keys (< 8) -> completely masked
-  TEST_ASSERT(MaskSecret("abc") == "***");
-  TEST_ASSERT(MaskSecret("a") == "*");
-
-  // Empty string -> empty
-  TEST_ASSERT(MaskSecret("").empty());
-
-  // Custom parameters: head_keep = 2, tail_keep = 2, mask_char = '#'
-  // Length 8 > 4 -> head 2, mask 4, tail 2
-  TEST_ASSERT(MaskSecret("12345678", 2, 2, '#') == "12####78");
-
-  // Custom parameters: length <= head_keep + tail_keep
-  TEST_ASSERT(MaskSecret("1234", 2, 2, '#') == "####");
-  TEST_ASSERT(MaskSecret("123", 2, 2, '#') == "###");
-
-  // Overflow protection with extreme size_t keep lengths
-  const size_t kMax = std::numeric_limits<size_t>::max();
-  TEST_ASSERT(MaskSecret("secret", kMax, 1) == "******");
-  TEST_ASSERT(MaskSecret("secret", 1, kMax) == "******");
-  TEST_ASSERT(MaskSecret("secret", kMax, kMax) == "******");
-  TEST_ASSERT(MaskSecret("secret", kMax, 0) == "******");
-}
-
-void TestDrainLinesFromBuffer() {
-  using vinput::str::DrainLinesFromBuffer;
-
-  // 1. Standard LF multi-line draining
-  {
-    std::string buffer = "first\nsecond\nthird\n";
-    std::vector<std::string> lines;
-    DrainLinesFromBuffer(buffer, [&](std::string_view line) { lines.emplace_back(line); });
-    TEST_ASSERT(lines.size() == 3);
-    TEST_ASSERT(lines[0] == "first");
-    TEST_ASSERT(lines[1] == "second");
-    TEST_ASSERT(lines[2] == "third");
-    TEST_ASSERT(buffer.empty());
-  }
-
-  // 2. CRLF multi-line draining (\r stripped)
-  {
-    std::string buffer = "hello\r\nworld\r\n";
-    std::vector<std::string> lines;
-    DrainLinesFromBuffer(buffer, [&](std::string_view line) { lines.emplace_back(line); });
-    TEST_ASSERT(lines.size() == 2);
-    TEST_ASSERT(lines[0] == "hello");
-    TEST_ASSERT(lines[1] == "world");
-    TEST_ASSERT(buffer.empty());
-  }
-
-  // 3. Partial tail without trailing newline, flush_tail = false
-  {
-    std::string buffer = "first\npartial tail";
-    std::vector<std::string> lines;
-    DrainLinesFromBuffer(buffer, [&](std::string_view line) { lines.emplace_back(line); }, false);
-    TEST_ASSERT(lines.size() == 1);
-    TEST_ASSERT(lines[0] == "first");
-    TEST_ASSERT(buffer == "partial tail");
-
-    // Append more and drain again
-    buffer += " completed\n";
-    DrainLinesFromBuffer(buffer, [&](std::string_view line) { lines.emplace_back(line); }, false);
-    TEST_ASSERT(lines.size() == 2);
-    TEST_ASSERT(lines[1] == "partial tail completed");
-    TEST_ASSERT(buffer.empty());
-  }
-
-  // 4. Partial tail with flush_tail = true
-  {
-    std::string buffer = "first\nfinal tail";
-    std::vector<std::string> lines;
-    DrainLinesFromBuffer(buffer, [&](std::string_view line) { lines.emplace_back(line); }, true);
-    TEST_ASSERT(lines.size() == 2);
-    TEST_ASSERT(lines[0] == "first");
-    TEST_ASSERT(lines[1] == "final tail");
-    TEST_ASSERT(buffer.empty());
-  }
-
-  // 5. Partial tail with \r and flush_tail = true
-  {
-    std::string buffer = "carriage tail\r";
-    std::vector<std::string> lines;
-    DrainLinesFromBuffer(buffer, [&](std::string_view line) { lines.emplace_back(line); }, true);
-    TEST_ASSERT(lines.size() == 1);
-    TEST_ASSERT(lines[0] == "carriage tail");
-    TEST_ASSERT(buffer.empty());
-  }
-
-  // 6. Empty buffer
-  {
-    std::string buffer;
-    int call_count = 0;
-    DrainLinesFromBuffer(buffer, [&](std::string_view) { ++call_count; }, true);
-    TEST_ASSERT(call_count == 0);
-    TEST_ASSERT(buffer.empty());
-  }
-
-  // 7. Pure newlines
-  {
-    std::string buffer = "\n\n";
-    std::vector<std::string> lines;
-    DrainLinesFromBuffer(buffer, [&](std::string_view line) { lines.emplace_back(line); });
-    TEST_ASSERT(lines.size() == 2);
-    TEST_ASSERT(lines[0].empty());
-    TEST_ASSERT(lines[1].empty());
-    TEST_ASSERT(buffer.empty());
-  }
-
-  // 8. Early break with bool return
-  {
-    std::string buffer = "line1\nline2\nline3\n";
-    std::vector<std::string> lines;
-    DrainLinesFromBuffer(
-        buffer,
-        [&](std::string_view line) -> bool {
-          lines.emplace_back(line);
-          return false; // stop immediately after line1
-        },
-        true);
-    TEST_ASSERT(lines.size() == 1);
-    TEST_ASSERT(lines[0] == "line1");
-    // line1 was processed and removed, line2 and line3 remain in buffer
-    TEST_ASSERT(buffer == "line2\nline3\n");
-  }
-}
-
-void TestUtf8ValidationAndTruncation() {
-  using vinput::str::IsValidUtf8;
-  using vinput::str::TruncateUtf8Bytes;
-
-  // Valid UTF-8 strings
-  TEST_ASSERT(IsValidUtf8(""));
-  TEST_ASSERT(IsValidUtf8("Hello, world!"));
-  TEST_ASSERT(IsValidUtf8("你好，世界！"));
-  TEST_ASSERT(IsValidUtf8("こんにちは"));
-  TEST_ASSERT(IsValidUtf8("🌟 Rocket 🚀"));
-
-  // Invalid UTF-8 strings
-  TEST_ASSERT(!IsValidUtf8(std::string_view("\xFF", 1)));
-  TEST_ASSERT(!IsValidUtf8(std::string_view("\xC0\xAF", 2)));
-  TEST_ASSERT(!IsValidUtf8(std::string_view("\xC1\x80", 2)));
-  TEST_ASSERT(!IsValidUtf8(std::string_view("\xE0\x80\xAF", 3)));
-  TEST_ASSERT(!IsValidUtf8(std::string_view("\xED\xA0\x80", 3)));
-  TEST_ASSERT(!IsValidUtf8(std::string_view("\xF4\x90\x80\x80", 4)));
-  TEST_ASSERT(!IsValidUtf8(std::string_view("\xE4\xBD", 2)));
-  TEST_ASSERT(!IsValidUtf8(std::string_view("Valid\x80Invalid", 13)));
-
-  // Truncation on UTF-8 boundaries ("你好" is 6 bytes)
-  TEST_ASSERT(TruncateUtf8Bytes("你好", 10) == "你好");
-  TEST_ASSERT(TruncateUtf8Bytes("你好", 6) == "你好");
-  TEST_ASSERT(TruncateUtf8Bytes("你好", 5) == "你");
-  TEST_ASSERT(TruncateUtf8Bytes("你好", 3) == "你");
-  TEST_ASSERT(TruncateUtf8Bytes("你好", 2).empty());
-  TEST_ASSERT(TruncateUtf8Bytes("你好", 0).empty());
-
-  // Truncation stops at invalid byte
-  TEST_ASSERT(TruncateUtf8Bytes(std::string_view("Prefix\xFFSuffix", 13), 10) == "Prefix");
-}
-
-void TestIsAsciiWhitespace() {
-  using vinput::str::IsAsciiWhitespace;
-
-  TEST_ASSERT(IsAsciiWhitespace(' '));
-  TEST_ASSERT(IsAsciiWhitespace('\t'));
-  TEST_ASSERT(IsAsciiWhitespace('\r'));
-  TEST_ASSERT(IsAsciiWhitespace('\n'));
-
-  TEST_ASSERT(!IsAsciiWhitespace('a'));
-  TEST_ASSERT(!IsAsciiWhitespace('0'));
-  TEST_ASSERT(!IsAsciiWhitespace('\0'));
-  TEST_ASSERT(!IsAsciiWhitespace('\v'));
-  TEST_ASSERT(!IsAsciiWhitespace('\f'));
-  TEST_ASSERT(!IsAsciiWhitespace('\x7f'));
-}
-
-void TestValidateUtf8TextDetailed() {
-  using vinput::str::ValidateUtf8Text;
-
-  // Valid inputs
-  auto res = ValidateUtf8Text("");
-  TEST_ASSERT(res.valid);
-
-  res = ValidateUtf8Text("hello world");
-  TEST_ASSERT(res.valid);
-
-  res = ValidateUtf8Text("语音输入法 🚀");
-  TEST_ASSERT(res.valid);
-
-  // Invalid leading byte
-  res = ValidateUtf8Text(std::string_view("\xFF", 1));
-  TEST_ASSERT(!res.valid);
-  TEST_ASSERT(res.error_offset == 0);
-  TEST_ASSERT(std::string_view(res.error_reason) == "invalid UTF-8 leading byte");
-
-  // Truncated sequence
-  res = ValidateUtf8Text(std::string_view("\xE4\xBD", 2));
-  TEST_ASSERT(!res.valid);
-  TEST_ASSERT(res.error_offset == 0);
-  TEST_ASSERT(std::string_view(res.error_reason) == "truncated UTF-8 sequence");
-
-  // Invalid continuation byte
-  res = ValidateUtf8Text(std::string_view("\xE4\xBD\x20", 3));
-  TEST_ASSERT(!res.valid);
-  TEST_ASSERT(res.error_offset == 2);
-  TEST_ASSERT(std::string_view(res.error_reason) == "invalid UTF-8 continuation byte");
-
-  // Overlong sequence
-  res = ValidateUtf8Text(std::string_view("\xE0\x80\xAF", 3));
-  TEST_ASSERT(!res.valid);
-  TEST_ASSERT(res.error_offset == 0);
-  TEST_ASSERT(std::string_view(res.error_reason) == "overlong UTF-8 sequence");
-
-  // Surrogate codepoint
-  res = ValidateUtf8Text(std::string_view("\xED\xA0\x80", 3));
-  TEST_ASSERT(!res.valid);
-  TEST_ASSERT(res.error_offset == 0);
-  TEST_ASSERT(std::string_view(res.error_reason) == "UTF-8 encodes a surrogate code point");
-
-  // Exceeds U+10FFFF
-  res = ValidateUtf8Text(std::string_view("\xF4\x90\x80\x80", 4));
-  TEST_ASSERT(!res.valid);
-  TEST_ASSERT(res.error_offset == 0);
-  TEST_ASSERT(std::string_view(res.error_reason) == "UTF-8 code point exceeds U+10FFFF");
-
-  // Embedded NUL
-  const std::string_view nul_str("hello\0world", 11);
-  res = ValidateUtf8Text(nul_str, /*allow_control_chars=*/true, /*allow_embedded_nul=*/true);
-  TEST_ASSERT(res.valid);
-
-  res = ValidateUtf8Text(nul_str, /*allow_control_chars=*/true, /*allow_embedded_nul=*/false);
-  TEST_ASSERT(!res.valid);
-  TEST_ASSERT(res.error_offset == 5);
-  TEST_ASSERT(std::string_view(res.error_reason) == "embedded NUL is not allowed");
-
-  // Control characters
-  res = ValidateUtf8Text("line1\t\r\nline2", /*allow_control_chars=*/false);
-  TEST_ASSERT(res.valid);
-
-  const std::string_view bell_str("bell\x07sound", 10);
-  res = ValidateUtf8Text(bell_str, /*allow_control_chars=*/true);
-  TEST_ASSERT(res.valid);
-
-  res = ValidateUtf8Text(bell_str, /*allow_control_chars=*/false);
-  TEST_ASSERT(!res.valid);
-  TEST_ASSERT(res.error_offset == 4);
-  TEST_ASSERT(std::string_view(res.error_reason) == "control character is not allowed");
-}
-
-void TestParseFloatStrict() {
-  using vinput::str::ParseFloatStrict;
-
-  float v = 0.0F;
-  TEST_ASSERT(ParseFloatStrict("0", &v) && v == 0.0F);
-  TEST_ASSERT(ParseFloatStrict("2.5", &v) && v == 2.5F);
-  TEST_ASSERT(ParseFloatStrict("+10.0", &v) && v == 10.0F);
-  TEST_ASSERT(ParseFloatStrict("-1.5", &v) && v == -1.5F);
-  TEST_ASSERT(ParseFloatStrict("1e-3", &v) && v == 0.001F);
-  TEST_ASSERT(ParseFloatStrict("0x1p+2", &v) && v == 4.0F);
-  TEST_ASSERT(ParseFloatStrict("-0x1p+2", &v) && v == -4.0F);
-  TEST_ASSERT(ParseFloatStrict("+0x1p+2", &v) && v == 4.0F);
-  TEST_ASSERT(ParseFloatStrict("3.5")); // nullptr overload check
-
-  // Strict rejections
-  TEST_ASSERT(!ParseFloatStrict(""));
-  TEST_ASSERT(!ParseFloatStrict("+"));
-  TEST_ASSERT(!ParseFloatStrict("-"));
-  TEST_ASSERT(!ParseFloatStrict("nan"));
-  TEST_ASSERT(!ParseFloatStrict("NaN"));
-  TEST_ASSERT(!ParseFloatStrict("inf"));
-  TEST_ASSERT(!ParseFloatStrict("Infinity"));
-  TEST_ASSERT(!ParseFloatStrict("1.2.3"));
-  TEST_ASSERT(!ParseFloatStrict("++1"));
-  TEST_ASSERT(!ParseFloatStrict("+-1"));
-  TEST_ASSERT(!ParseFloatStrict("-+1"));
-  TEST_ASSERT(!ParseFloatStrict("--1"));
-  TEST_ASSERT(!ParseFloatStrict("1e9999"));
-  TEST_ASSERT(!ParseFloatStrict("12abc"));
-  TEST_ASSERT(!ParseFloatStrict(" 2.5"));
-  TEST_ASSERT(!ParseFloatStrict("2.5 "));
-}
-
 namespace {
 void TestFmtStr() {
   using vinput::str::FmtStr;
-  using vinput::str::FormatSize;
 
   // 1. Basic formatting: nullptr, no args, integers, floats, string literals
   TEST_ASSERT(FmtStr(nullptr).empty());
   TEST_ASSERT(FmtStr("hello world") == "hello world");
   TEST_ASSERT(FmtStr("Number: %d, Float: %.2f", 42, 3.14159) == "Number: 42, Float: 3.14");
   TEST_ASSERT(FmtStr("Literal: %s", "constant") == "Literal: constant");
-
-  // FormatSize checks
-  TEST_ASSERT(FormatSize(500) == "500 B");
-  TEST_ASSERT(FormatSize(1024) == "1.0 KB");
-  TEST_ASSERT(FormatSize(1024ULL * 1024) == "1.0 MB");
-  TEST_ASSERT(FormatSize(1024ULL * 1024 * 1024 * 2) == "2.0 GB");
 
   // 2. std::string arguments (lvalue reference, temporary/rvalue)
   const std::string s_lvalue = "my_string";
@@ -718,28 +300,20 @@ void TestFmtStr() {
   const std::string combined = FmtStr("%s-%d-%s-%s-%d-%s", p1, 10, mixed_str, p2, 20, p3);
   TEST_ASSERT(combined == "alpha-10-middle-beta-20-gamma");
 }
+
 } // namespace
 
 int main() {
-  TestTrimAsciiWhitespace();
-  TestToLowerAndToUpperAscii();
+  TestTrim();
   TestEqualsIgnoreCase();
-  TestSplitByChar();
+  TestSplit();
   TestSplitLines();
-  TestBase64Encode();
-  TestStripPrefix();
   TestStripSuffix();
   TestConsumePrefix();
-  TestSplitPair();
-  TestSplitPairRight();
+  TestSplitOnce();
+  TestRSplitOnce();
   TestJoin();
   TestJoinKeyValue();
-  TestMaskSecret();
-  TestDrainLinesFromBuffer();
-  TestUtf8ValidationAndTruncation();
-  TestIsAsciiWhitespace();
-  TestValidateUtf8TextDetailed();
-  TestParseFloatStrict();
   TestFmtStr();
   return 0;
 }

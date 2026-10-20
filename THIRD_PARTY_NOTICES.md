@@ -43,6 +43,16 @@ This file lists third-party software that this project depends on or bundles, an
    - Upstream: https://github.com/martinmoene/scope-lite
    - Version: v0.3.0 (vendored in `3rdparty/scope/`)
 
+3. **tobiaslocker/base64** (`3rdparty/base64/`)
+   - Description: Fast C++17/20 header-only Base64 encode and decode library.
+   - License: MIT
+   - Upstream: https://github.com/tobiaslocker/base64
+
+4. **yhirose/cpp-unicodelib** (`3rdparty/unicodelib/`)
+   - Description: C++17/20 Unicode table and algorithm library supporting Unicode 18.0.0 East Asian Width (UAX #11), character categories, and grapheme clusters.
+   - License: MIT
+   - Upstream: https://github.com/yhirose/cpp-unicodelib
+
 ## Models / data downloaded by users (not bundled)
 
 1. **sherpa-onnx ASR models**

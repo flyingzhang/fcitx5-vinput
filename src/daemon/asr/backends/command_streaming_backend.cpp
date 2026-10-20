@@ -1,6 +1,7 @@
 #include "daemon/asr/backends/command_streaming_backend.h"
 
 #include <algorithm>
+#include <base64.hpp>
 #include <cerrno>
 #include <chrono>
 #include <cstddef>
@@ -113,7 +114,7 @@ std::vector<char*> BuildEnvp(const std::map<std::string, std::string>& env,
 }
 
 std::string FormatProviderError(std::string detail, std::string_view fallback) {
-  detail = vinput::str::TrimAsciiWhitespace(detail);
+  detail = std::string(vinput::str::Trim(detail));
   if (!detail.empty()) {
     return detail;
   }
@@ -405,7 +406,8 @@ private:
 
     json payload = {
         {"type", "audio"},
-        {"audio_base64", vinput::str::Base64Encode(pending_chunk_)},
+        {"audio_base64",
+         base64::encode_into<std::string>(pending_chunk_.begin(), pending_chunk_.end())},
         {"commit", commit},
     };
     pending_chunk_.clear();
@@ -627,8 +629,8 @@ private:
   }
 
   void ConsumeStdoutLines(std::string* error) {
-    vinput::str::DrainLinesFromBuffer(stdout_buffer_, [&](std::string_view raw_line) {
-      const std::string line = vinput::str::TrimAsciiWhitespace(raw_line);
+    vinput::process::DrainLinesFromBuffer(stdout_buffer_, [&](std::string_view raw_line) {
+      const std::string line(vinput::str::Trim(raw_line));
       if (line.empty()) {
         return true;
       }
@@ -637,10 +639,10 @@ private:
   }
 
   void ConsumeStderrLines(bool flush_tail = false) {
-    vinput::str::DrainLinesFromBuffer(
+    vinput::process::DrainLinesFromBuffer(
         stderr_buffer_,
         [&](std::string_view raw_line) {
-          const std::string line = vinput::str::TrimAsciiWhitespace(raw_line);
+          const std::string line(vinput::str::Trim(raw_line));
           if (line.empty()) {
             return;
           }
@@ -666,8 +668,7 @@ private:
       return true;
     }
     if (type == "partial") {
-      const std::string text =
-          vinput::str::TrimAsciiWhitespace(payload.value("text", std::string{}));
+      const std::string text = std::string(vinput::str::Trim(payload.value("text", std::string{})));
       if (!text.empty() && text != last_partial_text_) {
         last_partial_text_ = text;
         events_.push_back({RecognitionEventKind::PartialText, text, {}});
@@ -675,8 +676,7 @@ private:
       return true;
     }
     if (type == "final" || type == "final_timestamps") {
-      const std::string text =
-          vinput::str::TrimAsciiWhitespace(payload.value("text", std::string{}));
+      const std::string text = std::string(vinput::str::Trim(payload.value("text", std::string{})));
       if (!text.empty()) {
         saw_final_text_ = true;
         last_partial_text_.clear();
@@ -685,7 +685,7 @@ private:
       return true;
     }
     if (type == "error") {
-      QueueError(vinput::str::TrimAsciiWhitespace(payload.value("message", std::string{})));
+      QueueError(std::string(vinput::str::Trim(payload.value("message", std::string{}))));
       return true;
     }
     if (type == "closed") {

@@ -70,6 +70,7 @@ target_link_libraries(config PUBLIC
     spdlog::spdlog_header_only
     subprocess::subprocess
     nonstd::scope
+    unicodelib::unicodelib
 )
 
 target_link_libraries(common PUBLIC

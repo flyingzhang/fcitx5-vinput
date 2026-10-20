@@ -180,6 +180,19 @@ target_include_directories(3rdparty_scope SYSTEM INTERFACE
 )
 add_library(nonstd::scope ALIAS 3rdparty_scope)
 
+# 3rdparty vendored libraries (Track 2: Header-Only with SYSTEM INTERFACE)
+add_library(3rdparty_base64 INTERFACE)
+target_include_directories(3rdparty_base64 SYSTEM INTERFACE
+    ${CMAKE_SOURCE_DIR}/3rdparty/base64
+)
+add_library(base64::base64 ALIAS 3rdparty_base64)
+
+add_library(3rdparty_unicodelib INTERFACE)
+target_include_directories(3rdparty_unicodelib SYSTEM INTERFACE
+    ${CMAKE_SOURCE_DIR}/3rdparty/unicodelib
+)
+add_library(unicodelib::unicodelib ALIAS 3rdparty_unicodelib)
+
 set(VINPUT_SYSTEMD_USER_DIR
     "${CMAKE_INSTALL_DATAROOTDIR}/systemd/user"
     CACHE PATH "Install directory for the vinput systemd --user unit")

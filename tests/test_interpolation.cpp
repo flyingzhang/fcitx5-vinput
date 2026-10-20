@@ -150,7 +150,7 @@ void TestProcessEnvInterpolation() {
 
   const vinput::process::CommandResult res = vinput::process::RunCommandWithInput(spec, {});
   ExpectTrue(res.exit_code == 0);
-  ExpectEq(vinput::str::TrimAsciiWhitespace(res.stdout_text), std::string(path_val));
+  ExpectEq(std::string(vinput::str::Trim(res.stdout_text)), std::string(path_val));
 }
 
 } // namespace

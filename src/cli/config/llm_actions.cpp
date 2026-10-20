@@ -6,6 +6,7 @@
 #include <map>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <string_view>
 #include <sys/types.h>
 #include <system_error>
 #include <vector>
@@ -30,6 +31,23 @@
 #include "cli/utils/resource_utils.h"
 
 namespace {
+
+std::string MaskSecret(std::string_view secret, size_t head_keep = 4, size_t tail_keep = 4,
+                       char mask_char = '*') {
+  if (secret.empty()) {
+    return {};
+  }
+  std::string result;
+  result.reserve(secret.size());
+  if (tail_keep >= secret.size() || head_keep >= secret.size() - tail_keep) {
+    result.assign(secret.size(), mask_char);
+    return result;
+  }
+  result.append(secret.substr(0, head_keep));
+  result.append(secret.size() - head_keep - tail_keep, mask_char);
+  result.append(secret.substr(secret.size() - tail_keep));
+  return result;
+}
 
 int SetAdapterAutostart(const std::string& id, bool enable, Formatter& fmt, const CliContext& ctx) {
   CoreConfig config = LoadCoreConfig();
@@ -112,7 +130,7 @@ int RunLlmConfigList(Formatter& fmt, const CliContext& ctx) {
   std::vector<std::vector<std::string>> rows;
   rows.reserve(config.llm.providers.size());
   for (const auto& provider : config.llm.providers) {
-    rows.push_back({provider.id, provider.base_url, vinput::str::MaskSecret(provider.api_key)});
+    rows.push_back({provider.id, provider.base_url, MaskSecret(provider.api_key)});
   }
   fmt.PrintTable(headers, rows);
   return 0;
@@ -268,9 +286,9 @@ int RunLlmConfigAdd(const std::string& id, const std::string& baseUrl, const std
   }
 
   LlmProvider provider;
-  provider.id = vinput::str::TrimAsciiWhitespace(id);
-  provider.base_url = vinput::str::TrimAsciiWhitespace(baseUrl);
-  provider.api_key = vinput::str::TrimAsciiWhitespace(apiKey);
+  provider.id = std::string(vinput::str::Trim(id));
+  provider.base_url = std::string(vinput::str::Trim(baseUrl));
+  provider.api_key = std::string(vinput::str::Trim(apiKey));
   provider.extra_body = std::move(extra_json);
   config.llm.providers.push_back(std::move(provider));
 
@@ -287,7 +305,7 @@ int RunLlmConfigInstallAdapter(const std::string& selector,
   (void)ctx;
   std::map<std::string, std::string> overrides;
   for (const auto& item : envOverrides) {
-    const auto pair = vinput::str::SplitPair(item, '=');
+    const auto pair = vinput::str::SplitOnce(item, '=');
     if (!pair || pair->first.empty()) {
       // A malformed value may be a token pasted without its key, so never echo it back.
       fmt.PrintError(_("Invalid --env: expected KEY=VALUE."));
@@ -355,8 +373,7 @@ int RunLlmConfigInstallAdapter(const std::string& selector,
         continue;
       }
       const auto value = installed->env.find(spec.name);
-      if (value == installed->env.end() ||
-          vinput::str::TrimAsciiWhitespace(value->second).empty()) {
+      if (value == installed->env.end() || std::string(vinput::str::Trim(value->second)).empty()) {
         fmt.PrintWarning(vinput::str::FmtStr(
             _("Required env '%s' is empty; '%s' cannot start until it is set (re-run with -e "
               "%s=<value>)."),
@@ -741,10 +758,10 @@ int RunLlmConfigEdit(const std::string& id, const std::string& baseUrl, const st
   }
 
   if (hasBaseUrl) {
-    it->base_url = vinput::str::TrimAsciiWhitespace(baseUrl);
+    it->base_url = std::string(vinput::str::Trim(baseUrl));
   }
   if (hasApiKey) {
-    it->api_key = vinput::str::TrimAsciiWhitespace(apiKey);
+    it->api_key = std::string(vinput::str::Trim(apiKey));
   }
   if (hasExtraBody) {
     nlohmann::json extra_json;
