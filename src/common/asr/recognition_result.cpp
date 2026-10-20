@@ -1,37 +1,58 @@
 #include "recognition_result.h"
 
-#include <nlohmann/json.hpp>
+#include <cstdint>
+#include <glaze/core/common.hpp>
+#include <glaze/core/meta.hpp>
+#include <glaze/core/opts.hpp>
+#include <glaze/core/read.hpp>
+#include <glaze/json/write.hpp>
+#include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
-namespace vinput::result {
 namespace {
 
-using json = nlohmann::json;
+struct WireCandidate {
+  std::optional<std::string> text;
+  std::optional<std::string> source;
+};
 
-std::string JsonString(const json& object, const char* key) {
-  const auto it = object.find(key);
-  if (it == object.end() || !it->is_string()) {
-    return {};
-  }
-  return it->get<std::string>();
-}
+struct WirePayload {
+  std::optional<std::string> commit_text;
+  std::optional<std::vector<WireCandidate>> candidates;
+};
 
 } // namespace
 
+template <> struct glz::meta<vinput::result::Candidate> {
+  using T = vinput::result::Candidate;
+  static constexpr auto value = object("text", &T::text, "source", &T::source);
+};
+
+template <> struct glz::meta<vinput::result::Payload> {
+  using T = vinput::result::Payload;
+  static constexpr auto value = object("commit_text", &T::commitText, "candidates", &T::candidates);
+};
+
+template <> struct glz::meta<WireCandidate> {
+  static constexpr auto value =
+      object("text", &WireCandidate::text, "source", &WireCandidate::source);
+};
+
+template <> struct glz::meta<WirePayload> {
+  static constexpr auto value =
+      object("commit_text", &WirePayload::commit_text, "candidates", &WirePayload::candidates);
+};
+
+namespace vinput::result {
+
 std::string Serialize(const Payload& payload) {
-  json root = {
-      {"commit_text", payload.commitText},
-      {"candidates", json::array()},
-  };
-
-  for (const auto& candidate : payload.candidates) {
-    root["candidates"].push_back({
-        {"text", candidate.text},
-        {"source", candidate.source},
-    });
+  std::string out;
+  if (bool(glz::write_json(payload, out))) {
+    return {};
   }
-
-  return root.dump();
+  return out;
 }
 
 Payload Parse(std::string_view payload_text) {
@@ -39,33 +60,27 @@ Payload Parse(std::string_view payload_text) {
     return {};
   }
 
-  json root;
-  try {
-    root = json::parse(payload_text);
-  } catch (const std::exception&) {
-    return {};
-  }
-
-  if (!root.is_object()) {
+  WirePayload wire;
+  const auto ec =
+      glz::read<glz::opts{.error_on_unknown_keys = uint8_t{0}, .force_conformance = uint8_t{1}}>(
+          wire, payload_text);
+  if (bool(ec)) {
     return {};
   }
 
   Payload payload;
-  payload.commitText = JsonString(root, "commit_text");
+  if (wire.commit_text.has_value()) {
+    payload.commitText = std::move(*wire.commit_text);
+  }
 
-  const auto candidates_it = root.find("candidates");
-  if (candidates_it != root.end() && candidates_it->is_array()) {
-    for (const auto& candidate_value : *candidates_it) {
-      if (!candidate_value.is_object()) {
-        continue;
-      }
-
-      Candidate candidate{
-          .text = JsonString(candidate_value, "text"),
-          .source = JsonString(candidate_value, "source"),
-      };
-      if (!candidate.text.empty()) {
-        payload.candidates.push_back(std::move(candidate));
+  if (wire.candidates.has_value()) {
+    payload.candidates.reserve(wire.candidates->size());
+    for (auto& candidate : *wire.candidates) {
+      if (candidate.text.has_value() && !candidate.text->empty()) {
+        payload.candidates.push_back(Candidate{
+            .text = std::move(*candidate.text),
+            .source = candidate.source.value_or(""),
+        });
       }
     }
   }
