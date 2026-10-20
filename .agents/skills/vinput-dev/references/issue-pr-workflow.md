@@ -71,10 +71,12 @@ To avoid confusing functional planning with toolchain validation:
                                     +-------- Yes -------+
                                     | No                 |
 +-----------------------------------v-------------------+|
-| 5. Mark Ready, Full CI & Merge                        ||
+| 5. Mark Ready, Merge & Close Issue                    ||
 |    gh pr ready (activates full matrix CI & bots)      ||
 |    gh pr checks (verify all CI checks pass)           ||
 |    gh pr merge --squash --delete-branch               ||
+|    git checkout main && git pull                      ||
+|    gh issue view/close (guarantee closed state)       ||
 +-------------------------------------------------------+|
                                     ^                    |
                                     +--------------------+
@@ -194,14 +196,23 @@ git push origin <branch>
 *AI Attribution*: Whenever an agent authors PR descriptions, automated review fixes, or substantive comments, append:
 `*AI-assisted — Tool: <tool>; model: <provider>/<model>; version: <version-or-unavailable>.*`
 
-### Phase 5: Final Squash-Merge
+### Phase 5: Final Squash-Merge & Issue Lifecycle Closure
 ```bash
 # 1. Verify all checks pass
 gh pr checks
 
 # 2. (Optional for core changes) Trigger remote matrix dry build against PR branch
-gh workflow run release.yml --ref <branch_name> && gh run watch
+gh workflow run release.yml --ref <branch_name>
 
-# 3. Perform squash-merge and delete branch
-gh pr merge --squash --delete-branch
+# 3. Perform squash-merge and delete remote branch
+gh pr merge <pr_id> --squash --delete-branch
+
+# 4. Switch to main and sync latest commits locally
+git checkout main && git pull
+
+# 5. Verify & enforce Issue closure (guarantee complete lifecycle closure)
+issue_state=$(gh issue view <issue_id> --json state -q .state)
+if [ "${issue_state}" != "CLOSED" ]; then
+  gh issue close <issue_id> --comment "Closed via PR #<pr_id>."
+fi
 ```

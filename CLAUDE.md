@@ -34,6 +34,7 @@ gh workflow run release.yml --ref <branch> && gh run watch     # Remote multi-ar
 - **AI Attribution & Disclosure**: Append `*AI-assisted — Tool: <tool>; model: <provider>/<model>; version: <version-or-unavailable>.*` to PR descriptions, review fixes, and substantive comments.
 - **Dialectical Review Bot Triage & Pre-Action Reporting**: Never blindly follow CodeRabbit/Greptile suggestions. Critically evaluate findings against C++20 and project architecture. Before writing fix code, the agent MUST explicitly report its analysis (true issues vs. false positives and next actions) to the user in chat.
 - **Non-Blocking Handover (No CI Polling)**: Never busy-wait on remote CI (`gh run watch` or sleep polling). After `gh pr ready`, output PR/run URLs and yield control. Further review triage or merge actions are event-driven upon user prompt.
+- **Issue Lifecycle Complete Closure**: After squash-merging, switch to `main`, pull latest, and verify originating issue is `CLOSED` (close manually via `gh issue close` if not automatically closed). Never leave completed issues orphaned.
 - **Upstream-First API Policy (Context7)**:
   - `src/addon/`: Fcitx5 (`fcitx/fcitx5`)
   - `src/daemon/asr/`: sherpa-onnx (`k2-fsa/sherpa-onnx`)
