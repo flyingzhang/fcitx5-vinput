@@ -12,6 +12,7 @@ To avoid process overhead on non-functional changes while strictly guarding runt
 - **Scope**: Any modifications touching `src/`, `CMakeLists.txt`, `flake.nix`, CI workflows (`.github/workflows/`), packaging manifests (AUR/Flatpak), or anything affecting compilation, binary artifacts, or daemon/addon runtime behaviors.
 - **Mandatory Lifecycle**: Strict Issue $\to$ Pre-code Draft PR (all `- [ ]` unchecked) $\to$ single-item atomic commit & progressive push with PR checklist sync $\to$ `gh pr ready` for full remote CI validation $\to$ review bot triage $\to$ squash-merge.
 - **Micro-slicing**: Keep functional code diffs under 300 lines; break large epics into stacked micro-PRs.
+- **Pristine 3rdparty (零篡改铁律)**: Keep `3rdparty/` untouched upstream code. All wrappers and glue belong in `src/`.
 
 ### Track B: Text-Only, Documentation & Agent Governance (Direct Main Fast-Track)
 - **Scope**: Pure documentation (`docs/`, `*.md`, `THIRD_PARTY_NOTICES.md`), agent skills, prompts, and rules (`AGENTS.md`, `CLAUDE.md`, `.agents/skills/`).
@@ -193,6 +194,13 @@ git add <modified_files>
 git commit -m "fix(review): address review feedback (#<issue_id>)"
 git push origin <branch>
 ```
+
+**Proactive CI Quota Cancellation**:
+Before pushing or if an intermediate fix is needed, cancel obsolete runs to protect runner quota (preserving current HEAD):
+```bash
+gh run list --branch $(git branch --show-current) --status in_progress --json databaseId,headSha --jq ".[] | select(.headSha != \"$(git rev-parse HEAD)\") | .databaseId" | xargs -r -n 1 gh run cancel
+```
+
 *AI Attribution*: Whenever an agent authors PR descriptions, automated review fixes, or substantive comments, append:
 `*AI-assisted — Tool: <tool>; model: <provider>/<model>; version: <version-or-unavailable>.*`
 
