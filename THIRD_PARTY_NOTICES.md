@@ -53,6 +53,12 @@ This file lists third-party software that this project depends on or bundles, an
    - License: MIT
    - Upstream: https://github.com/yhirose/cpp-unicodelib
 
+5. **cameron314/readerwriterqueue** (`3rdparty/readerwriterqueue/`)
+   - Description: A fast, single-producer single-consumer lock-free queue for C++.
+   - License: BSD-2-Clause (Simplified BSD License) AND Zlib (Jeff Preshing's semaphore implementation embedded in `atomicops.h`)
+   - Upstream: https://github.com/cameron314/readerwriterqueue
+   - Version: v1.0.7 (commit 8b21766, imported 2026-10-21, vendored in `3rdparty/readerwriterqueue/`)
+
 ## Models / data downloaded by users (not bundled)
 
 1. **sherpa-onnx ASR models**
