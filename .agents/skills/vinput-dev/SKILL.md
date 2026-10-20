@@ -75,7 +75,7 @@ Read **[references/ecosystem.md](references/ecosystem.md)**
 ### Branch: Managing Dependencies & Third-Party Modernization
 Read **[references/dependency-spec.md](references/dependency-spec.md)**
 - **Trigger**: When adding or upgrading third-party C++ libraries, configuring CMake dependencies, updating `flake.nix` `buildInputs`, vendoring header-only libraries under `3rdparty/`, or touching `THIRD_PARTY_NOTICES.md`.
-- **Core Standard**: Follow Three-Tier Strategy (System-Only, System-Distributed, Vendored 3rdparty). Strict offline-friendly policy: zero network downloads (`FetchContent` git clone forbidden in builds for Nix/Flatpak/Arch chroot). Vendored libraries must be isolated via CMake `SYSTEM INTERFACE` to prevent `clang-tidy` diagnostic pollution without suppressing warnings. Hand-crafted infrastructure (e.g. ad-hoc Unicode/Base64 tables) is forbidden.
+- **Core Standard**: Strict Three-Tier Priority Cascade (System-First $\to$ 3rdparty Vendored Fallback). CMake must never download over network (`FetchContent` git clone prohibited for offline sandbox compatibility). Universal libraries use `find_package REQUIRED`. Vendored libraries in `3rdparty/` must be isolated via CMake `SYSTEM INTERFACE` to prevent `clang-tidy` diagnostic pollution without suppressing warnings. Hand-crafted infrastructure (e.g. ad-hoc Unicode/Base64 tables) is forbidden.
 
 ### Branch: Diagnosing Audio Streams or Daemon Runtime
 Read **[references/audio-debugging.md](references/audio-debugging.md)**

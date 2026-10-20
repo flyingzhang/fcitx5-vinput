@@ -29,7 +29,7 @@ gh workflow run release.yml --ref <branch> && gh run watch     # Remote multi-ar
 - **No Force-Push to Contributor Forks**: Never `git push -f` to external contributors' forks or branches.
 - **Breaking Config Changes**: If user-facing keys in `config.json` / `vinput.conf` change incompatibly, add a versioned ConfigMigration step (`src/common/config/config_migration.cpp` `RegisteredSteps`) in the **same PR**. No runtime aliases.
 - **Zero-Tolerance on Suppressing Diagnostics**: Never add `// NOLINT`, `#pragma GCC/clang diagnostic ignored`, or `-Wno-*` in CMake. Fix the root cause cleanly.
-- **Dependency & Offline Build Governance**: No network downloads / `FetchContent` during build. Follow Three-Tier Strategy: Layer 1/2 libraries via system packages (`find_package`); Layer 3 header-only libraries vendored under `3rdparty/` with CMake `SYSTEM INTERFACE` and registered in `THIRD_PARTY_NOTICES.md`. Hand-crafted infrastructure (e.g. ad-hoc Unicode/Base64 tables) is forbidden.
+- **Three-Tier Priority-First Dependency Governance**: No network downloads or `FetchContent` during build. Follow Three-Tier Priority Cascade: Tier 1/2 universal libraries via host packages (`find_package REQUIRED`); Tier 3 missing/single-header libraries vendored under `3rdparty/` with CMake `SYSTEM INTERFACE` and registered in `THIRD_PARTY_NOTICES.md`. Hand-crafted infrastructure (Unicode/Base64 tables) is forbidden.
 - **PR Micro-Slicing**: Keep functional code changes <300 lines; break large epics into stacked micro-PRs.
 - **AI Attribution & Disclosure**: Append `*AI-assisted — Tool: <tool>; model: <provider>/<model>; version: <version-or-unavailable>.*` to PR descriptions, review fixes, and substantive comments.
 - **Upstream-First API Policy (Context7)**:
