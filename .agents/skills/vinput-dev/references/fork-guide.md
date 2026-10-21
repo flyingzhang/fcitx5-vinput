@@ -41,12 +41,17 @@ Before opening or finalizing a PR, run the full health check suite:
                 +--------------+--------------+
                                |
                 +--------------v--------------+
-                | 3. Git Diff Audit (Cleanliness Inspection)  |
-                |    git diff upstream/main --stat            |
+                | 3. Code Duplication Audit   |
+                |    mise run check:dup       |
                 +--------------+--------------+
                                |
                 +--------------v--------------+
-                | 4. Conventional Commit & PR |
+                | 4. Git Diff Audit           |
+                |    git diff upstream/main   |
+                +--------------+--------------+
+                               |
+                +--------------v--------------+
+                | 5. Conventional Commit & PR |
                 |    gh pr create --repo ...                  |
                 +-----------------------------+
 ```
@@ -80,13 +85,23 @@ python3 -m json.tool data/default-config.json >/dev/null
 python3 -m json.tool notification.json >/dev/null
 ```
 
-### Step 2.3: Staged Git Diff Audit (Cleanliness Checklist)
+### Step 2.3: Code Duplication & Anti-Slop Audit
+```bash
+# Analyze code duplication across src/
+mise run check:dup
+```
+If duplicate blocks or clones are detected in touched files:
+1. Classify into Type A (Procedural Duplication / Slop to abstract into `src/common/`) vs Type B (Domain Boilerplate);
+2. Report the summary and proposed abstraction plan in chat and await maintainer confirmation before finalizing.
+
+### Step 2.4: Staged Git Diff Audit (Cleanliness Checklist)
 Run `git diff upstream/main --stat` and verify:
 - [ ] No temporary files, build artifacts (`build/`), or editor files (`.vscode/`, `.idea/`).
 - [ ] No hardcoded personal paths (e.g. `/home/username/...`).
 - [ ] No accidentally committed secret tokens or API keys (`detect-private-key` in `hk` guards this).
 - [ ] No merge conflict markers (`<<<<<<< HEAD`, `=======`).
 - [ ] User-facing C++ strings are wrapped in `_("...")` for gettext localization.
+- [ ] Canonical infrastructure in `src/common/` is reused (no private ad-hoc utility wheels).
 
 ---
 

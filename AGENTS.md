@@ -42,6 +42,20 @@ Progressive operational guide, hard constraints, and routing index for AI coding
 17. **Dialectical Review Bot Triage & Pre-Action Reporting**: Never treat automated review bot outputs (CodeRabbit, Greptile, etc.) as unquestioned instructions. Agents must critically evaluate every finding against codebase architecture, C++20 standards, and false-positive likelihood. Before writing any fix code, the agent **MUST** report its analysis to the user in chat (what is accepted as a true issue, what is rejected as false positive and why, and what actions will be taken next), and only proceed after communicating the plan.
 18. **Non-Blocking Handover (No CI Polling)**: Agents are strictly prohibited from busy-waiting or executing blocking polling loops (`gh run watch`, sleep loops, repeated `gh pr checks`). CI builds and review bots are asynchronous. Immediately after running `gh pr ready`, the agent must output the PR and Actions run URLs, summarize delivered changes, and yield control to the maintainer. Further actions (bot triage or merge) are event-driven upon user prompt.
 19. **Issue-PR Lifecycle Complete Closure**: After squash-merging a PR, the agent **MUST** switch back to `main`, pull latest changes (`git checkout main && git pull`), and explicitly verify that the originating issue is in the `CLOSED` state (via `gh issue view <issue_id>`). If not automatically closed by GitHub keywords, manually close it (`gh issue close <issue_id>`). Never leave completed issues orphaned in an open state.
+20. **SSOT Infrastructure Mandate (Zero Ad-hoc Utils)**: Never re-implement generic utility functions (e.g. ad-hoc string trimming, file reading, subprocess execution, ad-hoc JSON parsing). Always reuse project canonical infrastructure in `src/common/`:
+    - JSON serialization & reflection: `glaze` (`#include <glaze/glaze.hpp>`).
+    - Logging & tracing: Internal `spdlog` wrappers (`VLOG_INFO`, `VLOG_DEBUG`, `VLOG_ERROR`). Raw `fprintf(stderr)` and `std::cout` are forbidden.
+    - String formatting & i18n: User-facing text must use `vinput::str::FmtStr(_("..."), ...)`; internal string construction must use `std::format`.
+    - Subprocess execution: `subprocess.hpp` and `src/common/utils/process_utils.h`.
+    - Memory-mapped files: `mio`.
+    - Real-time lock-free audio buffering: Single-producer single-consumer queue `readerwriterqueue`. Raw mutexes in the audio callback path are forbidden.
+    - CLI subcommand parsing: `CLI11`.
+21. **Duplication Triage & Human Decision Protocol**: Never commit copy-pasted procedural logic across files. Before finalizing PRs or code changes, agents must run `mise run check:dup` to inspect code clones. When clones are detected:
+    - **Dialectical Triage**: The agent must critically classify findings into:
+      - *Type A (AI Slop / Procedural Duplication)*: Redundant helpers or duplicated procedural logic across files $\to$ formulate a concrete plan to abstract into reusable modules under `src/common/`.
+      - *Type B (Domain Boilerplate)*: Inherent protocol mappings, D-Bus XML dispatch stubs, or serialization tables $\to$ state concrete technical reasons for retaining.
+    - **Mandatory Pre-Action Report to Human**: The agent **MUST** report the duplication summary (clone locations, lines, tokens) and its triage logic to the human maintainer in chat, and **await explicit human decision/confirmation** before writing refactoring code or finalizing the task.
+22. **Strict Full-Project Linter Standards (Zero Compromise)**: Maintain full-file, zero-tolerance static analysis across every modified file (`lines-changed-only: false`, Clang-Tidy 21, Clang-Format, `-DVINPUT_ENABLE_WERROR=ON`). Never downgrade checks or compromise standards for legacy lines in touched files. Every touched file must strictly compile cleanly with zero warnings and zero diagnostic suppressions (`// NOLINT`).
 
 ---
 
@@ -51,6 +65,7 @@ Progressive operational guide, hard constraints, and routing index for AI coding
 # Quality Gate (run before every commit/push)
 mise run check:plan       # Preview execution plan and linters
 mise run check:changed    # Validate only touched files (safe, fast)
+mise run check:dup        # Analyze code duplication across src/ (jscpd)
 mise run fix              # Auto-format all files via hk/clang-format
 
 # CI & Remote Validation (CI-First strategy)

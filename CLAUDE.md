@@ -10,6 +10,7 @@ Compact index and operational quick-reference for Claude Code on `fcitx5-vinput`
 # Local Quality Gate (Run before every commit and push)
 mise run check:plan       # Preview execution plan and linters
 mise run check:changed    # Validate only touched files (safe, fast)
+mise run check:dup        # Analyze code duplication across src/ (jscpd)
 mise run fix              # Auto-format all modified files via hk/clang-format
 
 # CI & Remote Validation (Mandatory CI-First)
@@ -37,6 +38,9 @@ gh run list --branch $(git branch --show-current) --status in_progress --json da
 - **Three-Tier Dependencies & Pristine 3rdparty**: Host packages first (`find_package REQUIRED`); vendor single-header libraries under `3rdparty/` with CMake `SYSTEM INTERFACE`. Hand-crafted infrastructure forbidden. **Pristine 3rdparty (零篡改铁律)**: Keep `3rdparty/` strictly untouched upstream code. Never patch or reformat vendored files; place all wrappers and glue in `src/`.
 - **Proactive CI Quota Cancellation**: Cancel stale in-progress runs before pushing fixes or switching branches (`gh run cancel`). Never cancel runs on `main`.
 - **PR Micro-Slicing**: Keep functional code changes <300 lines; break large epics into stacked micro-PRs.
+- **SSOT Infrastructure Mandate**: Always reuse canonical `src/common/` infrastructure (`glaze`, `spdlog`, `subprocess.hpp` / `process_utils.h`, `mio`, `readerwriterqueue`, `CLI11`, `vinput::str::FmtStr`). Hand-crafted generic utils are strictly forbidden.
+- **Duplication Triage & Human Decision**: Run `mise run check:dup`. If clones are detected, report duplication summary and triage logic to the maintainer in chat. Await explicit human decision before refactoring or finalizing.
+- **Strict Full-Project Linter Standards**: Never downgrade Clang-Tidy to partial/lines-only checks (`lines-changed-only: false` enforced). All touched files must pass cleanly with zero warnings under `-Werror`.
 - **AI Attribution & Disclosure**: Append `*AI-assisted — Tool: <tool>; model: <provider>/<model>; version: <version-or-unavailable>.*` to PR descriptions, review fixes, and substantive comments.
 - **Dialectical Review Bot Triage & Pre-Action Reporting**: Never blindly follow CodeRabbit/Greptile suggestions. Critically evaluate findings against C++20 and project architecture. Before writing fix code, the agent MUST explicitly report its analysis (true issues vs. false positives and next actions) to the user in chat.
 - **Non-Blocking Handover (No CI Polling)**: Never busy-wait on remote CI (`gh run watch` or sleep polling). After `gh pr ready`, output PR/run URLs and yield control. Further review triage or merge actions are event-driven upon user prompt.

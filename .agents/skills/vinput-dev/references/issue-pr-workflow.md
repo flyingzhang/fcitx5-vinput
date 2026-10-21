@@ -142,6 +142,33 @@ For each unchecked `- [ ]` task in order:
    gh workflow run ci.yml --ref <branch>
    ```
 
+### Step 2.5: Code Duplication Triage & Human Decision Protocol (Anti-Slop Gate)
+Before marking the PR ready or finalizing non-trivial implementations:
+1. **Run Duplication Analysis**:
+   ```bash
+   mise run check:dup
+   ```
+2. **Dialectical Triage**:
+   Analyze any newly introduced or touched clone blocks:
+   - **Type A (Procedural Duplication / AI Slop)**: Unnecessary copy-pasting of helpers, parsing loops, or business logic. Must be abstracted and consolidated into canonical infrastructure under `src/common/`.
+   - **Type B (Legitimate Domain Boilerplate)**: Inherent protocol structures, D-Bus XML mapping stubs, or serialization tables where abstraction harms readability or compiler optimization.
+3. **Mandatory Pre-Action Report to Human (Awaiting Confirmation)**:
+   The agent **MUST** output a structured report in chat before making refactoring edits or finalizing PR readiness:
+   ```markdown
+   ### Code Duplication Triage & Decision Report
+
+   **1. Duplication Summary**
+   - Clone locations: `<file_a>:<start_line>-<end_line>` and `<file_b>:<start_line>-<end_line>` (<lines> lines, <tokens> tokens)
+   - Code pattern: ...
+
+   **2. Dialectical Triage & Proposed Action**
+   - **Type A (Procedural Duplication / Slop)**: ... (Explain why this should be abstracted into `src/common/...`)
+   - **Type B (Legitimate Domain Boilerplate)**: ... (Technical rationale for retaining)
+
+   **3. Awaiting Human Decision**
+   Please confirm whether to proceed with the proposed refactoring or retention. Once confirmed, I will execute the decision.
+   ```
+
 ### Phase 3: Mark Ready & Non-blocking Handover
 Since every task commit was already pushed and checked off during Phase 2, mark the PR ready to activate full validation:
 ```bash
@@ -173,18 +200,18 @@ Classify every bot finding into:
 #### Step 4.2: Mandatory Pre-Action Plan Report (BEFORE WRITING CODE)
 Before writing or changing any code, the agent **MUST** report its analysis and action plan to the user in chat using the following structure:
 ```markdown
-### Review Bot 辩证审阅与行动计划汇报
+### Review Bot Dialectical Analysis & Action Plan Report
 
-**1. 采纳并修复的建议（True Positives）**
-- [Bot名称] 建议说明：...
-  - 分析与修复方案：...（具体改动策略）
+**1. Accepted Actionable Issues (True Positives)**
+- [Bot Name] Suggestion: ...
+  - Analysis & Fix Strategy: ...
 
-**2. 判定为误报/忽略的建议（False Positives）**
-- [Bot名称] 建议说明：...
-  - 驳回理由：...（依据 C++20 标准、无锁语义或项目架构说明为何无需修改）
+**2. Rejected False Positives (Noise)**
+- [Bot Name] Suggestion: ...
+  - Rejection Rationale: ... (Based on C++20 standard, lock-free semantics, or architecture)
 
-**3. 接下来的行动（Next Steps）**
-接下来我将开始实施上述第 1 部分的修复方案，修改完后运行本地质检并推送。
+**3. Next Steps**
+I will implement the fixes in Section 1, run local quality gates, and push the commit.
 ```
 
 #### Step 4.3: Execute with Intent & Push
