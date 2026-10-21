@@ -1,15 +1,21 @@
 #include "cli/utils/formatter.h"
 
 #include <cstddef>
+#include <glaze/json/json_t.hpp>
 #include <iostream>
 #include <memory>
-#include <nlohmann/json.hpp>
-#include <nlohmann/json_fwd.hpp>
 #include <string>
 #include <tabulate/tabulate.hpp>
+#include <utility>
 #include <vector>
 
+#include "common/json/json_access.h"
+
 #include "cli/utils/cli_context.h"
+
+// Machine readable output keeps the JSON contract of the CLI: `PrintJson` writes
+// two space indented output with explicit nulls, while the single value helpers
+// stay compact.
 
 // ---- TextFormatter ----
 
@@ -115,8 +121,8 @@ void TextFormatter::PrintWarning(const std::string& msg) {
   std::cout << Yellow(msg) << "\n";
 }
 
-void TextFormatter::PrintJson(const nlohmann::json& j) {
-  std::cout << j.dump(2) << "\n";
+void TextFormatter::PrintJson(const glz::json_t& j) {
+  std::cout << vinput::json::ToPrettyText(j) << "\n";
 }
 
 void TextFormatter::PrintInfo(const std::string& msg) {
@@ -127,44 +133,45 @@ void TextFormatter::PrintInfo(const std::string& msg) {
 
 void JsonFormatter::PrintTable(const std::vector<std::string>& headers,
                                const std::vector<std::vector<std::string>>& rows) {
-  nlohmann::json arr = nlohmann::json::array();
+  glz::json_t::array_t arr;
+  arr.reserve(rows.size());
   for (const auto& row : rows) {
-    nlohmann::json obj = nlohmann::json::object();
+    glz::json_t::object_t obj;
     for (size_t i = 0; i < headers.size(); ++i) {
-      obj[headers[i]] = (i < row.size()) ? row[i] : "";
+      obj.emplace(headers[i], glz::json_t((i < row.size()) ? row[i] : std::string{}));
     }
-    arr.push_back(obj);
+    arr.emplace_back(std::move(obj));
   }
-  std::cout << arr.dump(2) << "\n";
+  std::cout << vinput::json::ToPrettyText(glz::json_t(std::move(arr))) << "\n";
 }
 
 void JsonFormatter::PrintKeyValue(const std::string& key, const std::string& value) {
-  const nlohmann::json obj = {{"key", key}, {"value", value}};
-  std::cout << obj.dump() << "\n";
+  const glz::json_t obj = {{"key", key}, {"value", value}};
+  std::cout << vinput::json::ToText(obj) << "\n";
 }
 
 void JsonFormatter::PrintSuccess(const std::string& msg) {
-  const nlohmann::json obj = {{"status", "success"}, {"message", msg}};
-  std::cout << obj.dump() << "\n";
+  const glz::json_t obj = {{"status", "success"}, {"message", msg}};
+  std::cout << vinput::json::ToText(obj) << "\n";
 }
 
 void JsonFormatter::PrintError(const std::string& msg) {
-  const nlohmann::json obj = {{"status", "error"}, {"message", msg}};
-  std::cerr << obj.dump() << "\n";
+  const glz::json_t obj = {{"status", "error"}, {"message", msg}};
+  std::cerr << vinput::json::ToText(obj) << "\n";
 }
 
 void JsonFormatter::PrintWarning(const std::string& msg) {
-  const nlohmann::json obj = {{"status", "warning"}, {"message", msg}};
-  std::cout << obj.dump() << "\n";
+  const glz::json_t obj = {{"status", "warning"}, {"message", msg}};
+  std::cout << vinput::json::ToText(obj) << "\n";
 }
 
-void JsonFormatter::PrintJson(const nlohmann::json& j) {
-  std::cout << j.dump(2) << "\n";
+void JsonFormatter::PrintJson(const glz::json_t& j) {
+  std::cout << vinput::json::ToPrettyText(j) << "\n";
 }
 
 void JsonFormatter::PrintInfo(const std::string& msg) {
-  const nlohmann::json obj = {{"status", "info"}, {"message", msg}};
-  std::cout << obj.dump() << "\n";
+  const glz::json_t obj = {{"status", "info"}, {"message", msg}};
+  std::cout << vinput::json::ToText(obj) << "\n";
 }
 
 // ---- Factory ----

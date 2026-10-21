@@ -1,6 +1,6 @@
 #include "cli/control/recording_actions.h"
 
-#include <nlohmann/json.hpp>
+#include <glaze/json/json_t.hpp>
 #include <string>
 
 #include "common/dbus/dbus_interface.h"
@@ -8,7 +8,9 @@
 #include "common/utils/string_utils.h"
 
 #include "cli/runtime/dbus_client.h"
+#include "cli/utils/cli_context.h"
 #include "cli/utils/cli_helpers.h"
+#include "cli/utils/formatter.h"
 
 namespace {
 
@@ -30,8 +32,9 @@ bool EnsureDaemon(vinput::cli::DbusClient& dbus, Formatter& fmt, const CliContex
 
 int RunRecordingControlStart(Formatter& fmt, const CliContext& ctx) {
   vinput::cli::DbusClient dbus;
-  if (!EnsureDaemon(dbus, fmt, ctx))
+  if (!EnsureDaemon(dbus, fmt, ctx)) {
     return 1;
+  }
 
   std::string err;
   if (!dbus.StartRecording(&err)) {
@@ -53,10 +56,11 @@ int RunRecordingControlStart(Formatter& fmt, const CliContext& ctx) {
 
 int RunRecordingControlStop(const std::string& scene_id, Formatter& fmt, const CliContext& ctx) {
   vinput::cli::DbusClient dbus;
-  if (!EnsureDaemon(dbus, fmt, ctx))
+  if (!EnsureDaemon(dbus, fmt, ctx)) {
     return 1;
+  }
 
-  std::string resolved = ResolveSceneId(scene_id);
+  const std::string resolved = ResolveSceneId(scene_id);
 
   std::string err;
   if (!dbus.StopRecording(resolved, &err)) {
@@ -69,9 +73,10 @@ int RunRecordingControlStop(const std::string& scene_id, Formatter& fmt, const C
   }
 
   if (ctx.json_output) {
-    nlohmann::json j = {{"ok", true}, {"action", "stop"}};
-    if (!resolved.empty())
+    glz::json_t j = {{"ok", true}, {"action", "stop"}};
+    if (!resolved.empty()) {
       j["scene"] = resolved;
+    }
     fmt.PrintJson(j);
   } else if (resolved.empty()) {
     fmt.PrintInfo(_("Recording stopped."));
@@ -83,8 +88,9 @@ int RunRecordingControlStop(const std::string& scene_id, Formatter& fmt, const C
 
 int RunRecordingControlToggle(const std::string& scene_id, Formatter& fmt, const CliContext& ctx) {
   vinput::cli::DbusClient dbus;
-  if (!EnsureDaemon(dbus, fmt, ctx))
+  if (!EnsureDaemon(dbus, fmt, ctx)) {
     return 1;
+  }
 
   std::string status;
   std::string status_err;
@@ -98,7 +104,7 @@ int RunRecordingControlToggle(const std::string& scene_id, Formatter& fmt, const
   }
 
   if (status == vinput::dbus::kStatusRecording) {
-    std::string resolved = ResolveSceneId(scene_id);
+    const std::string resolved = ResolveSceneId(scene_id);
 
     std::string stop_err;
     if (!dbus.StopRecording(resolved, &stop_err)) {
@@ -111,9 +117,10 @@ int RunRecordingControlToggle(const std::string& scene_id, Formatter& fmt, const
     }
 
     if (ctx.json_output) {
-      nlohmann::json j = {{"ok", true}, {"action", "stop"}};
-      if (!resolved.empty())
+      glz::json_t j = {{"ok", true}, {"action", "stop"}};
+      if (!resolved.empty()) {
         j["scene"] = resolved;
+      }
       fmt.PrintJson(j);
     } else if (resolved.empty()) {
       fmt.PrintInfo(_("Recording stopped."));

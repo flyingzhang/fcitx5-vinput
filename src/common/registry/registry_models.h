@@ -4,9 +4,11 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
-#include <nlohmann/json.hpp>
+#include <glaze/json/json_t.hpp>
 #include <string>
 #include <vector>
+
+#include "common/json/json_access.h"
 
 struct RemoteModelEntry {
   std::string id;
@@ -15,13 +17,16 @@ struct RemoteModelEntry {
   std::string sha256;
   uint64_t size_bytes = 0;
   std::string language;
-  nlohmann::json vinput_model; // pre-built vinput-model.json content
+  glz::json_t vinput_model; // pre-built vinput-model.json content
 
   // Convenience accessors reading from vinput_model
-  std::string model_type() const {
-    return vinput_model.value("family", vinput_model.value("model_type", ""));
+  [[nodiscard]] std::string model_type() const {
+    return vinput::json::String(vinput_model, "family",
+                                vinput::json::String(vinput_model, "model_type"));
   }
-  bool supports_hotwords() const { return vinput_model.value("supports_hotwords", false); }
+  [[nodiscard]] bool supports_hotwords() const {
+    return vinput::json::Bool(vinput_model, "supports_hotwords");
+  }
 };
 
 struct CoreConfig;
@@ -39,36 +44,36 @@ public:
   explicit ModelRepository(const std::string& base_dir);
 
   // Fetch remote model registry.
-  std::vector<RemoteModelEntry> FetchRegistry(const std::string& registry_url,
-                                              std::string* error) const;
-  std::vector<RemoteModelEntry> FetchRegistry(const std::vector<std::string>& registry_urls,
-                                              std::string* error,
-                                              std::string* resolved_registry_url = nullptr) const;
-  std::vector<RemoteModelEntry> FetchRegistry(const CoreConfig& config,
-                                              const std::vector<std::string>& registry_urls,
-                                              std::string* error,
-                                              std::string* resolved_registry_url = nullptr,
-                                              std::vector<std::string>* warnings = nullptr) const;
+  static std::vector<RemoteModelEntry> FetchRegistry(const std::string& registry_url,
+                                                     std::string* error);
+  static std::vector<RemoteModelEntry> FetchRegistry(const std::vector<std::string>& registry_urls,
+                                                     std::string* error,
+                                                     std::string* resolved_registry_url = nullptr);
+  static std::vector<RemoteModelEntry> FetchRegistry(const CoreConfig& config,
+                                                     const std::vector<std::string>& registry_urls,
+                                                     std::string* error,
+                                                     std::string* resolved_registry_url = nullptr,
+                                                     std::vector<std::string>* warnings = nullptr);
 
   // Download and install a model
   bool InstallModel(const std::string& registry_url, const std::string& model_id,
-                    ProgressCallback progress_cb, std::string* error,
+                    const ProgressCallback& progress_cb, std::string* error,
                     const std::atomic<bool>* cancel_token = nullptr) const;
   bool InstallModel(const std::vector<std::string>& registry_urls, const std::string& model_id,
-                    ProgressCallback progress_cb, std::string* error,
+                    const ProgressCallback& progress_cb, std::string* error,
                     std::string* resolved_registry_url = nullptr,
                     const std::atomic<bool>* cancel_token = nullptr) const;
   bool InstallModel(const CoreConfig& config, const std::vector<std::string>& registry_urls,
-                    const std::string& model_id, ProgressCallback progress_cb, std::string* error,
-                    std::string* resolved_registry_url = nullptr,
+                    const std::string& model_id, const ProgressCallback& progress_cb,
+                    std::string* error, std::string* resolved_registry_url = nullptr,
                     const std::atomic<bool>* cancel_token = nullptr) const;
 
 private:
   bool InstallModelEntry(const RemoteModelEntry& found, const ProgressCallback& progress_cb,
                          std::string* error, const std::atomic<bool>* cancel_token) const;
-  bool VerifySha256(const std::filesystem::path& file, const std::string& expected,
-                    std::string* error) const;
-  bool ExtractArchive(const std::filesystem::path& archive, const std::filesystem::path& dest,
-                      std::string* error) const;
+  static bool VerifySha256(const std::filesystem::path& file, const std::string& expected,
+                           std::string* error);
+  static bool ExtractArchive(const std::filesystem::path& archive,
+                             const std::filesystem::path& dest, std::string* error);
   std::filesystem::path base_dir_;
 };

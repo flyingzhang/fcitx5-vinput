@@ -1,40 +1,64 @@
 #include "core/vinput.h"
 
-#include <chrono>
+#include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <ctime>
 #include <dbus_public.h>
 #include <fcitx-config/iniparser.h>
 #include <fcitx-utils/event.h>
 #include <fcitx-utils/log.h>
 #include <fcitx/inputcontext.h>
+#include <filesystem>
 #include <fstream>
+#include <glaze/json/json_t.hpp>
+#include <iterator>
 #include <memory>
-#include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <unicodelib.h>
 #include <unicodelib_encodings.h>
 
 #include "common/config/core_config.h"
+#include "common/config/vinput_config.h"
 #include "common/dbus/dbus_interface.h"
 #include "common/dbus/error_info.h"
 #include "common/i18n.h"
+#include "common/json/json_access.h"
 #include "common/scene/postprocess_scene.h"
 #include "common/utils/file_utils.h"
 #include "common/utils/path_utils.h"
 #include "common/utils/sandbox.h"
-#include "common/utils/string_utils.h"
 #include "common/utils/time_utils.h"
 
 #include "core/context_writer.h"
 #include "dbus/notifier_dbus_object.h"
+#include "fcitx-config/rawconfig.h"
+#include "fcitx-utils/capabilityflags.h"
+#include "fcitx/addonfactory.h"
+#include "fcitx/addoninstance.h"
+#include "fcitx/event.h"
+#include "fcitx/instance.h"
 
 using namespace vinput::dbus;
 
 namespace {
 
+constexpr auto kContextClock = 1; // POSIX CLOCK_MONOTONIC
 constexpr const char* kContextSourceUser = "user";
-constexpr uint64_t kContextFlushDelayUsec = 5 * 1000 * 1000; // 5 seconds
+
+// Re-encodes `text` through the vendored Unicode codec, dropping ill formed byte
+// sequences. Context history is best effort input data that must never break the
+// JSONL cache file.
+std::string SanitizeUtf8(const std::string& text) {
+  if (text.empty()) {
+    return text;
+  }
+  const auto decoded = unicode::utf8::decode(text);
+  return unicode::utf8::encode(decoded);
+}
+constexpr uint64_t kContextFlushDelayUsec = 5ULL * 1000ULL * 1000ULL; // 5 seconds
 
 bool IsCjkAtBoundary(std::string_view left, std::string_view right) noexcept {
   auto decode_first = [](std::string_view s) -> char32_t {
@@ -73,8 +97,9 @@ bool EndsWithSentenceTerminal(std::string_view text) noexcept {
 
 // Auto-install systemd service when running inside a sandbox.
 void ensureDaemonServiceInstalled() {
-  if (!vinput::sandbox::IsInSandbox())
+  if (!vinput::sandbox::IsInSandbox()) {
     return;
+  }
 
   const auto missing = vinput::sandbox::MissingSandboxPermissions();
   if (!missing.empty()) {
@@ -88,14 +113,15 @@ void ensureDaemonServiceInstalled() {
   }
 
   std::error_code ec_exists;
-  bool destExists = std::filesystem::exists(dest, ec_exists);
+  const bool destExists = std::filesystem::exists(dest, ec_exists);
   if (ec_exists) {
     FCITX_LOG(Error) << "vinput: failed to check existence of " << dest << ": "
                      << ec_exists.message();
     return;
   }
-  if (destExists)
+  if (destExists) {
     return;
+  }
 
   const auto src = vinput::path::DaemonServiceUnitTemplatePath();
   std::ifstream src_f(src);
@@ -122,11 +148,12 @@ void ensureDaemonServiceInstalled() {
   auto reload_cmd = vinput::sandbox::WrapHostCommand({"systemctl", "--user", "daemon-reload"});
   std::string cmd;
   for (const auto& arg : reload_cmd) {
-    if (!cmd.empty())
+    if (!cmd.empty()) {
       cmd += ' ';
+    }
     cmd += arg;
   }
-  int ret = system(cmd.c_str());
+  const int ret = system(cmd.c_str());
   if (ret != 0) {
     FCITX_LOG(Error) << "vinput: failed to reload systemd user daemon, return code: " << ret;
   }
@@ -137,7 +164,7 @@ VinputEngine::VinputEngine(fcitx::Instance* instance) : instance_(instance) {
   vinput::i18n::Init();
   ensureDaemonServiceInstalled();
   initializePaletteRegistry();
-  reloadConfig();
+  VinputEngine::reloadConfig();
   event_dispatcher_.attach(&instance_->eventLoop());
 
   eventHandlers_.emplace_back(instance_->watchEvent(
@@ -147,7 +174,7 @@ VinputEngine::VinputEngine(fcitx::Instance* instance) : instance_(instance) {
   eventHandlers_.emplace_back(instance_->watchEvent(
       fcitx::EventType::InputContextCreated, fcitx::EventWatcherPhase::PreInputMethod,
       [this](fcitx::Event& event) {
-        auto& icEvent = static_cast<fcitx::InputContextEvent&>(event);
+        auto& icEvent = dynamic_cast<fcitx::InputContextEvent&>(event);
         auto* ic = icEvent.inputContext();
         ic->setCapabilityFlags(ic->capabilityFlags() | fcitx::CapabilityFlag::SurroundingText);
         rememberInputContext(ic);
@@ -156,7 +183,7 @@ VinputEngine::VinputEngine(fcitx::Instance* instance) : instance_(instance) {
   eventHandlers_.emplace_back(
       instance_->watchEvent(fcitx::EventType::InputContextDestroyed,
                             fcitx::EventWatcherPhase::PreInputMethod, [this](fcitx::Event& event) {
-                              auto& icEvent = static_cast<fcitx::InputContextEvent&>(event);
+                              auto& icEvent = dynamic_cast<fcitx::InputContextEvent&>(event);
                               auto* ic = icEvent.inputContext();
                               if (session_ && session_->ic == ic) {
                                 if (session_->phase == Session::Phase::PendingStart ||
@@ -214,12 +241,12 @@ VinputEngine::VinputEngine(fcitx::Instance* instance) : instance_(instance) {
   eventHandlers_.emplace_back(
       instance_->watchEvent(fcitx::EventType::InputContextCommitString,
                             fcitx::EventWatcherPhase::PostInputMethod, [this](fcitx::Event& event) {
-                              auto& commitEvent = static_cast<fcitx::CommitStringEvent&>(event);
+                              auto& commitEvent = dynamic_cast<fcitx::CommitStringEvent&>(event);
                               onCommitString(commitEvent.text(), commitEvent.inputContext());
                             }));
 
   auto* dbus_addon = instance_->addonManager().addon("dbus");
-  if (dbus_addon) {
+  if (dbus_addon != nullptr) {
     bus_ = dbus_addon->call<fcitx::IDBusModule::bus>();
     const std::weak_ptr<bool> token = lifetime_token_;
     notifier_dbus_ = std::make_unique<VinputNotifierDBusObject>(
@@ -302,9 +329,7 @@ void VinputEngine::reloadSceneConfig() {
 
   int max_cl = 0;
   for (const auto& s : scene_config_.scenes) {
-    if (s.context_lines > max_cl) {
-      max_cl = s.context_lines;
-    }
+    max_cl = std::max(max_cl, s.context_lines);
   }
   max_context_lines_ = max_cl;
   if (max_context_lines_ <= 0) {
@@ -317,7 +342,7 @@ void VinputEngine::reloadSceneConfig() {
 }
 
 void VinputEngine::rememberInputContext(fcitx::InputContext* ic) {
-  if (!ic) {
+  if (ic == nullptr) {
     return;
   }
   last_active_ic_ = ic;
@@ -328,10 +353,10 @@ VinputEngine::resolveFrontendInputContext(fcitx::InputContext* fallback_ic) cons
   if (session_) {
     return session_->ic;
   }
-  if (status_ic_) {
+  if (status_ic_ != nullptr) {
     return status_ic_;
   }
-  if (fallback_ic) {
+  if (fallback_ic != nullptr) {
     return fallback_ic;
   }
   return last_active_ic_;
@@ -342,21 +367,25 @@ void VinputEngine::appendContextEntry(const std::string& text, const char* sourc
     return;
   }
   // Flush user buffer before writing non-user entries to preserve ordering.
-  if (source && std::string_view(source) != kContextSourceUser && !context_buffer_text_.empty()) {
+  if (source != nullptr && std::string_view(source) != kContextSourceUser &&
+      !context_buffer_text_.empty()) {
     flushContextBuffer();
   }
-  nlohmann::json entry;
-  entry["text"] = text;
-  entry["source"] = source ? source : kContextSourceUser;
-  entry["timestamp"] = vinput::time::CurrentUnixTimestampSeconds();
+  // JSONL keeps one object per line. Text coming from ASR may carry ill formed
+  // UTF-8, so it is round tripped through the vendored Unicode codec to keep the
+  // cache file parseable.
+  const glz::json_t entry = {
+      {"text", SanitizeUtf8(text)},
+      {"source",
+       SanitizeUtf8(source != nullptr ? std::string(source) : std::string(kContextSourceUser))},
+      {"timestamp", static_cast<double>(vinput::time::CurrentUnixTimestampSeconds())},
+  };
 
   if (!context_writer_) {
     context_writer_ =
         std::make_unique<vinput::addon::AsyncContextWriter>(vinput::path::ContextCachePath());
   }
-  if (!context_writer_->Enqueue(
-          entry.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace),
-          max_context_lines_)) {
+  if (!context_writer_->Enqueue(vinput::json::ToText(entry), max_context_lines_)) {
     // The queue is deliberately bounded. Do not silently discard context
     // when the disk cannot keep up with incoming input history.
     FCITX_LOG(Error) << "vinput: context persistence backlog exceeded its capacity";
@@ -405,11 +434,11 @@ void VinputEngine::accumulateContextBuffer(const std::string& text, fcitx::Input
   }
 
   // Reset 5s inactivity timer.
-  const auto fire_at = fcitx::now(CLOCK_MONOTONIC) + kContextFlushDelayUsec;
+  const auto fire_at = fcitx::now(kContextClock) + kContextFlushDelayUsec;
   if (!context_flush_timer_) {
     const std::weak_ptr<bool> token = lifetime_token_;
     context_flush_timer_ = instance_->eventLoop().addTimeEvent(
-        CLOCK_MONOTONIC, fire_at, 0, [this, token](fcitx::EventSourceTime*, uint64_t) {
+        kContextClock, fire_at, 0, [this, token](fcitx::EventSourceTime*, uint64_t) {
           if (token.expired()) {
             return false;
           }

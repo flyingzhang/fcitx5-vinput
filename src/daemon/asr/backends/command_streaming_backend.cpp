@@ -1,6 +1,7 @@
 #include "daemon/asr/backends/command_streaming_backend.h"
 
 #include <algorithm>
+#include <array>
 #include <base64.hpp>
 #include <cerrno>
 #include <chrono>
@@ -9,32 +10,35 @@
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
+#include <glaze/core/common.hpp>
+#include <glaze/json/json_t.hpp>
+#include <glaze/json/read.hpp>
 #include <map>
-#include <nlohmann/json.hpp>
-#include <optional>
+#include <memory>
 #include <poll.h>
 #include <span>
 #include <spawn.h>
 #include <string>
 #include <string_view>
 #include <sys/poll.h>
-#include <sys/wait.h>
+#include <sys/types.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
 
+#include "common/config/core_config_types.h"
+#include "common/json/json_access.h"
 #include "common/utils/interpolation.h"
 #include "common/utils/process_utils.h"
 #include "common/utils/string_utils.h"
 #include "common/utils/time_utils.h"
 
-extern char** environ;
+#include "daemon/asr/runtime/recognition_contract.h"
 
 namespace vinput::daemon::asr {
 
 namespace {
 
-using json = nlohmann::json;
 using Clock = std::chrono::steady_clock;
 
 constexpr int kPollSliceMs = 50;
@@ -73,7 +77,7 @@ std::vector<char*> BuildArgv(const CommandAsrProvider& provider,
   for (auto& entry : *storage) {
     argv.push_back(entry.data());
   }
-  argv.push_back(nullptr);
+  argv.emplace_back(nullptr);
   return argv;
 }
 
@@ -81,8 +85,8 @@ std::vector<char*> BuildEnvp(const std::map<std::string, std::string>& env,
                              std::vector<std::string>* storage) {
   storage->clear();
 
-  for (char** entry = environ; entry && *entry; ++entry) {
-    storage->push_back(*entry);
+  for (char* const* entry = environ; entry != nullptr && *entry != nullptr; ++entry) {
+    storage->emplace_back(*entry);
   }
 
   for (const auto& [key, value] : env) {
@@ -93,7 +97,7 @@ std::vector<char*> BuildEnvp(const std::map<std::string, std::string>& env,
     const std::string resolved_value = vinput::interpolate::InterpolateEnv(value);
     const std::string prefix = key + "=";
     for (auto& item : *storage) {
-      if (item.rfind(prefix, 0) == 0) {
+      if (item.starts_with(prefix)) {
         item = prefix + resolved_value;
         replaced = true;
         break;
@@ -122,7 +126,7 @@ std::string FormatProviderError(std::string detail, std::string_view fallback) {
 }
 
 struct ChildProcess {
-  pid_t pid = -1;
+  int pid = -1;
   int stdin_fd = -1;
   int stdout_fd = -1;
   int stderr_fd = -1;
@@ -132,8 +136,8 @@ struct ChildProcess {
 };
 
 bool SpawnChild(const CommandAsrProvider& provider, ChildProcess* child, std::string* error) {
-  if (!child) {
-    if (error) {
+  if (child == nullptr) {
+    if (error != nullptr) {
       *error = "child process output is null";
     }
     return false;
@@ -152,7 +156,7 @@ bool SpawnChild(const CommandAsrProvider& provider, ChildProcess* child, std::st
   if (!vinput::process::CreateCloexecPipe(stdin_pipe) ||
       !vinput::process::CreateCloexecPipe(stdout_pipe) ||
       !vinput::process::CreateCloexecPipe(stderr_pipe)) {
-    if (error) {
+    if (error != nullptr) {
       *error = std::string("pipe failed: ") + std::strerror(errno);
     }
     CloseIfOpen(&stdin_pipe[0]);
@@ -178,7 +182,7 @@ bool SpawnChild(const CommandAsrProvider& provider, ChildProcess* child, std::st
   std::vector<std::string> env_storage;
   std::vector<char*> envp = BuildEnvp(provider.env, &env_storage);
 
-  pid_t pid = -1;
+  int pid = -1;
   const int rc =
       posix_spawnp(&pid, provider.command.c_str(), &actions, nullptr, argv.data(), envp.data());
   posix_spawn_file_actions_destroy(&actions);
@@ -188,7 +192,7 @@ bool SpawnChild(const CommandAsrProvider& provider, ChildProcess* child, std::st
   CloseIfOpen(&stderr_pipe[1]);
 
   if (rc != 0) {
-    if (error) {
+    if (error != nullptr) {
       *error = std::string("failed to launch command: ") + std::strerror(rc);
     }
     CloseIfOpen(&stdin_pipe[1]);
@@ -199,12 +203,11 @@ bool SpawnChild(const CommandAsrProvider& provider, ChildProcess* child, std::st
 
   if (!SetNonBlocking(stdin_pipe[1]) || !SetNonBlocking(stdout_pipe[0]) ||
       !SetNonBlocking(stderr_pipe[0])) {
-    kill(pid, SIGKILL);
-    waitpid(pid, nullptr, 0);
+    (void)vinput::process::KillAndReap(pid);
     CloseIfOpen(&stdin_pipe[1]);
     CloseIfOpen(&stdout_pipe[0]);
     CloseIfOpen(&stderr_pipe[0]);
-    if (error) {
+    if (error != nullptr) {
       *error = std::string("fcntl failed: ") + std::strerror(errno);
     }
     return false;
@@ -214,7 +217,7 @@ bool SpawnChild(const CommandAsrProvider& provider, ChildProcess* child, std::st
   child->stdin_fd = stdin_pipe[1];
   child->stdout_fd = stdout_pipe[0];
   child->stderr_fd = stderr_pipe[0];
-  if (error) {
+  if (error != nullptr) {
     error->clear();
   }
   return true;
@@ -230,15 +233,19 @@ int RemainingMs(Clock::time_point deadline, int fallback_ms) {
 
 class CommandStreamingSession : public RecognitionSession {
 public:
-  CommandStreamingSession(const CommandAsrProvider& provider, std::string provider_id)
-      : provider_(provider), provider_id_(std::move(provider_id)),
-        deadline_(Clock::time_point::max()) {}
+  CommandStreamingSession(CommandAsrProvider provider, std::string provider_id)
+      : provider_(std::move(provider)), provider_id_(std::move(provider_id)) {}
+
+  CommandStreamingSession(const CommandStreamingSession&) = delete;
+  CommandStreamingSession& operator=(const CommandStreamingSession&) = delete;
+  CommandStreamingSession(CommandStreamingSession&&) = delete;
+  CommandStreamingSession& operator=(CommandStreamingSession&&) = delete;
 
   ~CommandStreamingSession() override { Terminate(); }
 
   bool PushAudio(std::span<const int16_t> pcm, std::string* error) override {
     if (finished_) {
-      if (error) {
+      if (error != nullptr) {
         *error = "Recognition session already finished.";
       }
       return false;
@@ -253,15 +260,15 @@ public:
     }
 
     if (!pcm.empty()) {
-      const auto* bytes = reinterpret_cast<const std::byte*>(pcm.data());
-      pending_chunk_.assign(bytes, bytes + pcm.size() * sizeof(int16_t));
+      const auto byte_span = std::as_bytes(pcm);
+      pending_chunk_.assign(byte_span.begin(), byte_span.end());
     }
 
     if (!PumpIo(0, error)) {
       return false;
     }
 
-    if (error) {
+    if (error != nullptr) {
       error->clear();
     }
     return true;
@@ -269,7 +276,7 @@ public:
 
   bool Finish(std::string* error) override {
     if (finished_) {
-      if (error) {
+      if (error != nullptr) {
         error->clear();
       }
       return true;
@@ -307,7 +314,7 @@ public:
         QueueError(FormatProviderError(std::move(stderr_tail_), "timed out."));
         QueueCompleted();
         Terminate();
-        if (error) {
+        if (error != nullptr) {
           *error = events_.back().error;
         }
         return false;
@@ -334,7 +341,7 @@ public:
     QueueCompleted();
     Terminate();
 
-    if (error) {
+    if (error != nullptr) {
       if (saw_error_ && !events_.empty()) {
         for (const auto& event : events_) {
           if (event.kind == RecognitionEventKind::Error) {
@@ -382,13 +389,13 @@ private:
       return true;
     }
     if (provider_.command.empty()) {
-      if (error) {
+      if (error != nullptr) {
         *error = "Command ASR provider has empty command.";
       }
       return false;
     }
     if (!SpawnChild(provider_, &child_, error)) {
-      QueueError(error ? *error : "failed to start.");
+      QueueError(error != nullptr ? *error : "failed to start.");
       QueueCompleted();
       return false;
     }
@@ -398,13 +405,13 @@ private:
 
   bool FlushPendingChunk(bool commit, std::string* error) {
     if (pending_chunk_.empty()) {
-      if (error) {
+      if (error != nullptr) {
         error->clear();
       }
       return true;
     }
 
-    json payload = {
+    const glz::json_t payload = {
         {"type", "audio"},
         {"audio_base64",
          base64::encode_into<std::string>(pending_chunk_.begin(), pending_chunk_.end())},
@@ -415,21 +422,21 @@ private:
   }
 
   bool SendControlEvent(std::string_view type, std::string* error) {
-    json payload = {
-        {"type", type},
+    const glz::json_t payload = {
+        {"type", std::string(type)},
     };
     return SendJsonLine(payload, error);
   }
 
-  bool SendJsonLine(const json& payload, std::string* error) {
+  bool SendJsonLine(const glz::json_t& payload, std::string* error) {
     if (child_.stdin_closed || child_.stdin_fd < 0) {
-      if (error) {
+      if (error != nullptr) {
         *error = "provider stdin is already closed.";
       }
       return false;
     }
 
-    std::string line = payload.dump();
+    std::string line = vinput::json::ToText(payload);
     line.push_back('\n');
     std::size_t offset = 0;
     // Each outbound message has its own deadline. A prolonged recording
@@ -440,7 +447,7 @@ private:
     const auto write_deadline = Clock::now() + std::chrono::milliseconds(write_timeout_ms);
     while (offset < line.size()) {
       if (HasTimedOut(write_deadline) || HasTimedOut(deadline_)) {
-        if (error) {
+        if (error != nullptr) {
           *error = FormatProviderError(std::move(stderr_tail_), "provider write timed out.");
         }
         return false;
@@ -455,7 +462,7 @@ private:
         if (errno == EINTR) {
           continue;
         }
-        if (error) {
+        if (error != nullptr) {
           *error = std::string("poll failed: ") + std::strerror(errno);
         }
         return false;
@@ -469,7 +476,7 @@ private:
       }
 
       if ((fd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
-        if (error) {
+        if (error != nullptr) {
           *error = FormatProviderError(std::move(stderr_tail_), "provider closed stdin.");
         }
         return false;
@@ -486,13 +493,13 @@ private:
       if (written < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) {
         continue;
       }
-      if (error) {
+      if (error != nullptr) {
         *error = std::string("write failed: ") + std::strerror(errno);
       }
       return false;
     }
 
-    if (error) {
+    if (error != nullptr) {
       error->clear();
     }
     return true;
@@ -500,7 +507,7 @@ private:
 
   bool PumpIo(int poll_timeout_ms, std::string* error) {
     if (!started_) {
-      if (error) {
+      if (error != nullptr) {
         error->clear();
       }
       return true;
@@ -508,18 +515,18 @@ private:
 
     ReapChild();
 
-    pollfd fds[2];
-    nfds_t nfds = 0;
+    std::array<pollfd, 2> fds{};
+    std::size_t nfds = 0;
     if (child_.stdout_fd >= 0) {
-      fds[nfds].fd = child_.stdout_fd;
-      fds[nfds].events = POLLIN;
-      fds[nfds].revents = 0;
+      fds.at(nfds).fd = child_.stdout_fd;
+      fds.at(nfds).events = POLLIN;
+      fds.at(nfds).revents = 0;
       ++nfds;
     }
     if (child_.stderr_fd >= 0) {
-      fds[nfds].fd = child_.stderr_fd;
-      fds[nfds].events = POLLIN;
-      fds[nfds].revents = 0;
+      fds.at(nfds).fd = child_.stderr_fd;
+      fds.at(nfds).events = POLLIN;
+      fds.at(nfds).revents = 0;
       ++nfds;
     }
 
@@ -537,24 +544,24 @@ private:
       }
     }
     if (nfds > 0) {
-      const int rc = poll(fds, nfds, timeout_ms);
+      const int rc = poll(fds.data(), static_cast<nfds_t>(nfds), timeout_ms);
       if (rc < 0 && errno != EINTR) {
-        if (error) {
+        if (error != nullptr) {
           *error = std::string("poll failed: ") + std::strerror(errno);
         }
         return false;
       }
 
-      for (nfds_t i = 0; i < nfds; ++i) {
-        if ((fds[i].revents & POLLIN) == 0 &&
-            (fds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) == 0) {
+      for (std::size_t i = 0; i < nfds; ++i) {
+        if ((fds.at(i).revents & POLLIN) == 0 &&
+            (fds.at(i).revents & (POLLERR | POLLHUP | POLLNVAL)) == 0) {
           continue;
         }
-        if (fds[i].fd == child_.stdout_fd) {
+        if (fds.at(i).fd == child_.stdout_fd) {
           if (!DrainStdout(error)) {
             return false;
           }
-        } else if (fds[i].fd == child_.stderr_fd) {
+        } else if (fds.at(i).fd == child_.stderr_fd) {
           DrainStderr();
         }
       }
@@ -564,7 +571,7 @@ private:
     if (child_.child_exited && child_.exit_code != 0 && !saw_error_ && !saw_final_text_) {
       QueueError(FormatProviderError(std::move(stderr_tail_), "failed."));
     }
-    if (error) {
+    if (error != nullptr) {
       error->clear();
     }
     return true;
@@ -579,7 +586,7 @@ private:
         remaining_budget -= static_cast<std::size_t>(n);
         stdout_buffer_.append(buffer, static_cast<std::size_t>(n));
         ConsumeStdoutLines(error);
-        if (error && !error->empty()) {
+        if (error != nullptr && !error->empty()) {
           return false;
         }
         continue;
@@ -594,7 +601,7 @@ private:
       if (errno == EINTR) {
         continue;
       }
-      if (error) {
+      if (error != nullptr) {
         *error = std::string("read stdout failed: ") + std::strerror(errno);
       }
       return false;
@@ -653,22 +660,21 @@ private:
   }
 
   bool HandleOutputLine(const std::string& line, std::string* error) {
-    json payload;
-    try {
-      payload = json::parse(line);
-    } catch (const std::exception& ex) {
-      if (error) {
-        *error = std::string("invalid streaming provider JSON: ") + ex.what();
+    glz::json_t payload;
+    if (const auto ec = glz::read_json(payload, line); bool(ec)) {
+      if (error != nullptr) {
+        *error = std::string("invalid streaming provider JSON: ") + glz::format_error(ec, line);
       }
       return false;
     }
 
-    const std::string type = payload.value("type", std::string{});
+    const std::string type = vinput::json::String(payload, "type");
     if (type == "session_started" || type.empty()) {
       return true;
     }
     if (type == "partial") {
-      const std::string text = std::string(vinput::str::Trim(payload.value("text", std::string{})));
+      const std::string text =
+          std::string(vinput::str::Trim(vinput::json::String(payload, "text")));
       if (!text.empty() && text != last_partial_text_) {
         last_partial_text_ = text;
         events_.push_back({RecognitionEventKind::PartialText, text, {}});
@@ -676,7 +682,8 @@ private:
       return true;
     }
     if (type == "final" || type == "final_timestamps") {
-      const std::string text = std::string(vinput::str::Trim(payload.value("text", std::string{})));
+      const std::string text =
+          std::string(vinput::str::Trim(vinput::json::String(payload, "text")));
       if (!text.empty()) {
         saw_final_text_ = true;
         last_partial_text_.clear();
@@ -685,7 +692,7 @@ private:
       return true;
     }
     if (type == "error") {
-      QueueError(std::string(vinput::str::Trim(payload.value("message", std::string{}))));
+      QueueError(std::string(vinput::str::Trim(vinput::json::String(payload, "message"))));
       return true;
     }
     if (type == "closed") {
@@ -714,19 +721,12 @@ private:
     if (child_.pid <= 0 || child_.child_exited) {
       return;
     }
-    int status = 0;
-    const pid_t rc = waitpid(child_.pid, &status, WNOHANG);
-    if (rc != child_.pid) {
+    int exit_code = -1;
+    if (!vinput::process::TryReapProcess(child_.pid, &exit_code)) {
       return;
     }
     child_.child_exited = true;
-    if (WIFEXITED(status)) {
-      child_.exit_code = WEXITSTATUS(status);
-    } else if (WIFSIGNALED(status)) {
-      child_.exit_code = 128 + WTERMSIG(status);
-    } else {
-      child_.exit_code = -1;
-    }
+    child_.exit_code = exit_code;
     ConsumeStderrLines(true);
   }
 
@@ -742,12 +742,7 @@ private:
 
     ReapChild();
     if (child_.pid > 0 && !child_.child_exited) {
-      kill(child_.pid, SIGKILL);
-      pid_t wait_rc = waitpid(child_.pid, nullptr, 0);
-      while (wait_rc < 0 && errno == EINTR) {
-        wait_rc = waitpid(child_.pid, nullptr, 0);
-      }
-      if (wait_rc == child_.pid || (wait_rc < 0 && errno == ECHILD)) {
+      if (vinput::process::KillAndReap(child_.pid)) {
         child_.child_exited = true;
         child_.exit_code = -1;
       }
@@ -756,7 +751,7 @@ private:
 
   CommandAsrProvider provider_;
   std::string provider_id_;
-  Clock::time_point deadline_{};
+  Clock::time_point deadline_ = Clock::time_point::max();
   ChildProcess child_;
   bool started_ = false;
   bool finished_ = false;
@@ -778,7 +773,7 @@ class CommandStreamingBackend : public AsrBackend {
 public:
   explicit CommandStreamingBackend(CommandAsrProvider provider) : provider_(std::move(provider)) {}
 
-  BackendDescriptor Describe() const override {
+  [[nodiscard]] BackendDescriptor Describe() const override {
     BackendDescriptor descriptor;
     descriptor.provider_id = provider_.id;
     descriptor.provider_type = vinput::asr::kCommandProviderType;
@@ -792,12 +787,12 @@ public:
 
   std::unique_ptr<RecognitionSession> CreateSession(std::string* error) override {
     if (provider_.command.empty()) {
-      if (error) {
+      if (error != nullptr) {
         *error = "Command ASR provider has empty command.";
       }
       return nullptr;
     }
-    if (error) {
+    if (error != nullptr) {
       error->clear();
     }
     return std::make_unique<CommandStreamingSession>(provider_, provider_.id);
@@ -812,12 +807,12 @@ private:
 std::unique_ptr<AsrBackend> CreateCommandStreamingBackend(const CommandAsrProvider& provider,
                                                           std::string* error) {
   if (provider.command.empty()) {
-    if (error) {
+    if (error != nullptr) {
       *error = "Command ASR provider has empty command.";
     }
     return nullptr;
   }
-  if (error) {
+  if (error != nullptr) {
     error->clear();
   }
   return std::make_unique<CommandStreamingBackend>(provider);

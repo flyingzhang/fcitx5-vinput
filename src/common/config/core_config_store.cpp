@@ -1,13 +1,18 @@
+#include <cstdint>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <mutex>
-#include <nlohmann/json.hpp>
+#include <string>
+#include <system_error>
+#include <utility>
 
 #include "common/config/core_config.h"
+#include "common/config/core_config_types.h"
+#include "common/scene/postprocess_scene.h"
 #include "common/utils/file_utils.h"
 #include "common/utils/path_utils.h"
-
-using json = nlohmann::ordered_json;
 
 namespace {
 
@@ -38,17 +43,17 @@ bool GetConfigStat(const std::filesystem::path& path, std::filesystem::file_time
   if (ec) {
     return false;
   }
-  if (mtime) {
+  if (mtime != nullptr) {
     *mtime = t;
   }
-  if (size) {
+  if (size != nullptr) {
     *size = s;
   }
   return true;
 }
 
 void MaterializeBuiltinSceneLabels(CoreConfig* config) {
-  if (!config) {
+  if (config == nullptr) {
     return;
   }
   for (auto& scene : config->scenes.definitions) {
@@ -61,21 +66,21 @@ void MaterializeBuiltinSceneLabels(CoreConfig* config) {
   }
 }
 
-CoreConfig LoadCoreConfigFromFile(const std::filesystem::path& path) {
-  CoreConfig config;
+// Returns false when the file exists but could not be parsed, so the caller can
+// avoid caching defaults over the user's unreadable configuration.
+bool LoadCoreConfigFromFile(const std::filesystem::path& path, CoreConfig* config) {
   std::ifstream file(path);
   if (!file.is_open()) {
-    return config;
+    return false;
   }
 
-  try {
-    json root;
-    file >> root;
-    from_json(root, config);
-  } catch (const json::exception& e) {
-    std::cerr << "Failed to parse vinput config: " << e.what() << "\n";
+  const std::string text{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+  std::string parse_error;
+  if (!CoreConfigFromJson(text, config, &parse_error)) {
+    std::cerr << "Failed to parse vinput config: " << parse_error << "\n";
+    return false;
   }
-  return config;
+  return true;
 }
 
 } // namespace
@@ -93,7 +98,7 @@ CoreConfig LoadCoreConfig() {
   const std::filesystem::path path = vinput::path::CoreConfigPath();
 
   auto& cache = GetConfigCache();
-  std::lock_guard<std::mutex> lock(cache.mu);
+  const std::scoped_lock lock(cache.mu);
 
   std::filesystem::file_time_type mtime;
   std::uintmax_t size = 0;
@@ -115,7 +120,9 @@ CoreConfig LoadCoreConfig() {
     NormalizeCoreConfig(&config);
     cacheable = false;
   } else {
-    config = LoadCoreConfigFromFile(path);
+    if (!LoadCoreConfigFromFile(path, &config)) {
+      cacheable = false;
+    }
     NormalizeCoreConfig(&config);
   }
 
@@ -136,12 +143,12 @@ bool InitializeCoreConfig(std::string* error) {
     return false;
   }
   if (!SaveCoreConfig(config)) {
-    if (error) {
+    if (error != nullptr) {
       *error = "Failed to save default config.";
     }
     return false;
   }
-  if (error) {
+  if (error != nullptr) {
     error->clear();
   }
   return true;
@@ -156,37 +163,35 @@ bool SaveCoreConfig(const CoreConfig& config) {
     return false;
   }
 
-  try {
-    CoreConfig normalized = config;
-    NormalizeCoreConfig(&normalized);
-    if (!ValidateCoreConfig(normalized, &error)) {
-      return false;
-    }
-    MaterializeBuiltinSceneLabels(&normalized);
-
-    json root;
-    to_json(root, normalized);
-    if (!vinput::file::AtomicWriteTextFile(path, root.dump(4) + "\n", &error)) {
-      std::cerr << "Failed to write config: " << error << "\n";
-      return false;
-    }
-
-    auto& cache = GetConfigCache();
-    std::lock_guard<std::mutex> lock(cache.mu);
-
-    std::filesystem::file_time_type mtime;
-    std::uintmax_t size = 0;
-    if (GetConfigStat(path, &mtime, &size)) {
-      cache.cached = std::move(normalized);
-      cache.mtime = mtime;
-      cache.size = size;
-      cache.hasCache = true;
-    } else {
-      cache.hasCache = false;
-    }
-    return true;
-  } catch (const json::exception& e) {
-    std::cerr << "Failed to serialize vinput config: " << e.what() << "\n";
+  CoreConfig normalized = config;
+  NormalizeCoreConfig(&normalized);
+  if (!ValidateCoreConfig(normalized, &error)) {
     return false;
   }
+  MaterializeBuiltinSceneLabels(&normalized);
+
+  const std::string serialized = CoreConfigToJson(normalized);
+  if (serialized.empty()) {
+    std::cerr << "Failed to serialize vinput config\n";
+    return false;
+  }
+  if (!vinput::file::AtomicWriteTextFile(path, serialized + "\n", &error)) {
+    std::cerr << "Failed to write config: " << error << "\n";
+    return false;
+  }
+
+  auto& cache = GetConfigCache();
+  const std::scoped_lock lock(cache.mu);
+
+  std::filesystem::file_time_type mtime;
+  std::uintmax_t size = 0;
+  if (GetConfigStat(path, &mtime, &size)) {
+    cache.cached = std::move(normalized);
+    cache.mtime = mtime;
+    cache.size = size;
+    cache.hasCache = true;
+  } else {
+    cache.hasCache = false;
+  }
+  return true;
 }

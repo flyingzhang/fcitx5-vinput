@@ -1,11 +1,12 @@
 #pragma once
 
 #include <filesystem>
-#include <nlohmann/json.hpp>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "common/config/core_config_types.h"
+#include "common/scene/postprocess_scene.h"
 
 // API Functions
 CoreConfig LoadCoreConfig();
@@ -14,8 +15,12 @@ bool InitializeCoreConfig(std::string* error);
 bool SaveCoreConfig(const CoreConfig& config);
 std::string GetCoreConfigPath();
 
-void to_json(nlohmann::ordered_json& j, const CoreConfig& config);
-void from_json(const nlohmann::ordered_json& j, CoreConfig& config);
+// Serializes the config to the on-disk `config.json` representation: four space
+// indentation, meaningful fields only.
+std::string CoreConfigToJson(const CoreConfig& config);
+// Parses the on-disk `config.json` representation. On failure `error` receives a
+// diagnostic and `config` is left untouched.
+bool CoreConfigFromJson(std::string_view text, CoreConfig* config, std::string* error);
 
 void NormalizeCoreConfig(CoreConfig* config);
 bool ValidateCoreConfig(const CoreConfig& config, std::string* error);

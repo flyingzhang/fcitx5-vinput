@@ -4,24 +4,27 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <exception>
 #include <fcntl.h>
+#include <filesystem>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <subprocess.hpp>
 #include <sys/poll.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
 
 #include "common/utils/interpolation.h"
-
-extern char** environ;
 
 namespace vinput::process {
 
@@ -47,7 +50,7 @@ std::vector<std::string> BuildCmd(const CommandSpec& spec) {
 
 std::map<std::string, std::string> BuildEnvMap(const CommandSpec& spec) {
   std::map<std::string, std::string> env_map;
-  for (char** env = environ; env && *env; ++env) {
+  for (char* const* env = environ; env != nullptr && *env != nullptr; ++env) {
     const std::string entry(*env);
     const auto eq_pos = entry.find('=');
     if (eq_pos != std::string::npos) {
@@ -62,6 +65,40 @@ std::map<std::string, std::string> BuildEnvMap(const CommandSpec& spec) {
 }
 
 } // namespace
+
+bool KillAndReap(pid_t pid) {
+  if (pid <= 0) {
+    return true;
+  }
+  constexpr int kSigKill = 9; // POSIX SIGKILL
+  (void)syscall(SYS_kill, pid, kSigKill);
+  pid_t wait_rc = waitpid(pid, nullptr, 0);
+  while (wait_rc < 0 && errno == EINTR) {
+    wait_rc = waitpid(pid, nullptr, 0);
+  }
+  return wait_rc == pid || (wait_rc < 0 && errno == ECHILD);
+}
+
+bool TryReapProcess(pid_t pid, int* exit_code) {
+  if (pid <= 0) {
+    return false;
+  }
+  int status = 0;
+  constexpr int kNoHang = 1; // POSIX WNOHANG
+  const pid_t rc = waitpid(pid, &status, kNoHang);
+  if (rc != pid) {
+    return false;
+  }
+  if (exit_code != nullptr) {
+    const int term_sig = status & 0x7f;
+    if (term_sig == 0) {
+      *exit_code = (status >> 8) & 0xff; // WEXITSTATUS
+    } else {
+      *exit_code = 128 + term_sig; // WTERMSIG
+    }
+  }
+  return true;
+}
 
 bool CreateCloexecPipe(int pipefd[2]) {
 #if defined(__linux__)

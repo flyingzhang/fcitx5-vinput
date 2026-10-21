@@ -40,6 +40,15 @@ bool SpawnForMonitoring(const CommandSpec& spec, const std::filesystem::path& wo
                         SpawnedProcess* process_out, std::string* error);
 bool CreateCloexecPipe(int pipefd[2]);
 
+// Forcefully terminates `pid` with SIGKILL and reaps it, tolerating children that
+// already exited or were reaped elsewhere. Returns true when the child is known
+// to be gone.
+bool KillAndReap(pid_t pid);
+
+// Non-blocking wait for child process exit. Returns true if the child has exited,
+// populating `exit_code` with its normalized return code if non-null.
+bool TryReapProcess(pid_t pid, int* exit_code = nullptr);
+
 // Drains complete newline-terminated lines out of an incrementally filled
 // process output buffer, leaving any unterminated tail in place. A trailing
 // '\r' is stripped so CRLF streams behave like LF ones. When `flush_tail` is

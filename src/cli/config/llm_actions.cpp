@@ -3,16 +3,21 @@
 #include <algorithm>
 #include <cstddef>
 #include <filesystem>
+#include <glaze/core/common.hpp>
+#include <glaze/core/context.hpp>
+#include <glaze/json/json_t.hpp>
+#include <glaze/json/read.hpp>
 #include <map>
-#include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 #include <sys/types.h>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include "common/config/core_config.h"
 #include "common/i18n.h"
+#include "common/json/json_access.h"
 #include "common/llm/adapter_manager.h"
 #include "common/llm/defaults.h"
 #include "common/llm/provider_model_cache.h"
@@ -59,8 +64,8 @@ int SetAdapterAutostart(const std::string& id, bool enable, Formatter& fmt, cons
     return 1;
   }
 
-  auto it = std::find_if(config.llm.adapters.begin(), config.llm.adapters.end(),
-                         [&resolved_id](const LlmAdapter& a) { return a.id == resolved_id; });
+  auto it = std::ranges::find_if(
+      config.llm.adapters, [&resolved_id](const LlmAdapter& a) { return a.id == resolved_id; });
   if (it == config.llm.adapters.end()) {
     fmt.PrintError(vinput::str::FmtStr(_("Adapter '%s' not found."), id));
     return 1;
@@ -86,47 +91,56 @@ int SetAdapterAutostart(const std::string& id, bool enable, Formatter& fmt, cons
   return 0;
 }
 
-bool ParseExtraBody(const std::string& raw, nlohmann::json* out, Formatter& fmt) {
+bool ParseExtraBody(const std::string& raw, glz::json_t* out, Formatter& fmt) {
+  *out = glz::json_t(glz::json_t::object_t{});
   if (raw.empty()) {
-    *out = nlohmann::json::object();
     return true;
   }
-  try {
-    auto parsed = nlohmann::json::parse(raw);
-    if (!parsed.is_object()) {
-      fmt.PrintError(_("--extra-body must be a JSON object (e.g. "
-                       "'{\"enable_thinking\": false}')."));
-      return false;
-    }
-    *out = std::move(parsed);
-    return true;
-  } catch (const std::exception& e) {
-    fmt.PrintError(vinput::str::FmtStr(_("Invalid --extra-body JSON: %s"), e.what()));
+  if (!vinput::json::IsSingleJsonValue(raw)) {
+    // Reuse the parse error message so no new translatable string is needed.
+    const glz::error_ctx trailing{.ec = glz::error_code::syntax_error, .location = raw.size()};
+    fmt.PrintError(vinput::str::FmtStr(_("Invalid --extra-body JSON: %s"),
+                                       glz::format_error(trailing).c_str()));
     return false;
   }
+  glz::json_t parsed;
+  if (const auto ec = glz::read_json(parsed, raw); bool(ec)) {
+    fmt.PrintError(vinput::str::FmtStr(_("Invalid --extra-body JSON: %s"),
+                                       glz::format_error(ec, raw).c_str()));
+    return false;
+  }
+  if (!parsed.is_object()) {
+    fmt.PrintError(_("--extra-body must be a JSON object (e.g. "
+                     "'{\"enable_thinking\": false}')."));
+    return false;
+  }
+  *out = std::move(parsed);
+  return true;
 }
 
 } // namespace
 
 int RunLlmConfigList(Formatter& fmt, const CliContext& ctx) {
-  CoreConfig config = LoadCoreConfig();
+  const CoreConfig config = LoadCoreConfig();
 
   if (ctx.json_output) {
-    nlohmann::json providers = nlohmann::json::array();
+    glz::json_t::array_t providers;
+    providers.reserve(config.llm.providers.size());
     for (const auto& provider : config.llm.providers) {
-      providers.push_back({
+      glz::json_t json_entry = {
           {"id", provider.id},
           {"base_url", provider.base_url},
           {"api_key", ""},
-          {"extra_body",
-           provider.extra_body.is_object() ? provider.extra_body : nlohmann::json::object()},
-      });
+          {"extra_body", provider.extra_body.is_object() ? provider.extra_body
+                                                         : glz::json_t(glz::json_t::object_t{})},
+      };
+      providers.emplace_back(std::move(json_entry));
     }
-    fmt.PrintJson(providers);
+    fmt.PrintJson(glz::json_t(std::move(providers)));
     return 0;
   }
 
-  std::vector<std::string> headers = {_("ID"), _("BASE_URL"), _("API_KEY")};
+  const std::vector<std::string> headers = {_("ID"), _("BASE_URL"), _("API_KEY")};
   std::vector<std::vector<std::string>> rows;
   rows.reserve(config.llm.providers.size());
   for (const auto& provider : config.llm.providers) {
@@ -143,21 +157,23 @@ int RunLlmConfigListAdapters(bool available, Formatter& fmt, const CliContext& c
 
   if (!available) {
     if (ctx.json_output) {
-      nlohmann::json arr = nlohmann::json::array();
+      glz::json_t::array_t arr;
+      arr.reserve(config.llm.adapters.size());
       for (const auto& adapter : config.llm.adapters) {
         const auto it = installed_display_map.find(adapter.id);
-        arr.push_back({
+        glz::json_t json_entry = {
             {"id", vinput::cli::HumanizeResourceId(installed_display_map, adapter.id)},
             {"machine_id", adapter.id},
             {"title", it == installed_display_map.end() ? "" : it->second.title},
             {"readme_url", it == installed_display_map.end() ? "" : it->second.readme_url},
             {"command", adapter.command},
-            {"args", adapter.args},
-            {"env", adapter.env},
+            {"args", vinput::json::FromStrings(adapter.args)},
+            {"env", vinput::json::FromStringMap(adapter.env)},
             {"auto_start", adapter.autoStart},
-        });
+        };
+        arr.emplace_back(std::move(json_entry));
       }
-      fmt.PrintJson(arr);
+      fmt.PrintJson(glz::json_t(std::move(arr)));
       return 0;
     }
 
@@ -203,11 +219,12 @@ int RunLlmConfigListAdapters(bool available, Formatter& fmt, const CliContext& c
   };
 
   if (ctx.json_output) {
-    nlohmann::json arr = nlohmann::json::array();
+    glz::json_t::array_t arr;
     for (const auto& entry : entries) {
-      nlohmann::json envs = nlohmann::json::array();
+      glz::json_t::array_t envs;
       for (const auto& env : entry.envs) {
-        envs.push_back({{"name", env.name}, {"required", env.required}});
+        glz::json_t json_entry = {{"name", env.name}, {"required", env.required}};
+        envs.emplace_back(std::move(json_entry));
       }
       const bool installed = isInstalled(entry.id);
       const auto ver_info = vinput::script::CheckResourceVersion(
@@ -221,24 +238,25 @@ int RunLlmConfigListAdapters(bool available, Formatter& fmt, const CliContext& c
                          : "installed";
       }
 
-      arr.push_back({
+      glz::json_t json_entry = {
           {"id", vinput::cli::HumanizeResourceId(entry.id, entry.short_id)},
           {"machine_id", entry.id},
           {"title", display_map.at(entry.id).title},
           {"description", display_map.at(entry.id).description},
           {"readme_url", entry.readme_url},
-          {"envs", envs},
+          {"envs", glz::json_t(std::move(envs))},
           {"status", status_str},
           {"installed_version", ver_info.installed_version},
           {"remote_version", ver_info.remote_version},
           {"vinput_version", ver_info.vinput_version},
-      });
+      };
+      arr.emplace_back(std::move(json_entry));
     }
-    fmt.PrintJson(arr);
+    fmt.PrintJson(glz::json_t(std::move(arr)));
     return 0;
   }
 
-  std::vector<std::string> headers = {_("ID"), _("TITLE"), _("STATUS"), _("README")};
+  const std::vector<std::string> headers = {_("ID"), _("TITLE"), _("STATUS"), _("README")};
   std::vector<std::vector<std::string>> rows;
   for (const auto& entry : entries) {
     const bool installed = isInstalled(entry.id);
@@ -280,7 +298,7 @@ int RunLlmConfigAdd(const std::string& id, const std::string& baseUrl, const std
     return 1;
   }
 
-  nlohmann::json extra_json;
+  glz::json_t extra_json;
   if (!ParseExtraBody(extraBody, &extra_json, fmt)) {
     return 1;
   }
@@ -339,9 +357,8 @@ int RunLlmConfigInstallAdapter(const std::string& selector,
     return 1;
   }
 
-  const auto it =
-      std::find_if(entries.begin(), entries.end(),
-                   [&id](const vinput::script::RegistryEntry& entry) { return entry.id == id; });
+  const auto it = std::ranges::find_if(
+      entries, [&id](const vinput::script::RegistryEntry& entry) { return entry.id == id; });
   if (it == entries.end()) {
     fmt.PrintError(vinput::str::FmtStr(_("Adapter '%s' not found in registry."), id));
     return 1;
@@ -406,13 +423,13 @@ int RunLlmConfigRemoveAdapter(const std::string& id, Formatter& fmt, const CliCo
     }
   }
 
-  auto it = std::remove_if(config.llm.adapters.begin(), config.llm.adapters.end(),
-                           [&resolved_id](const LlmAdapter& a) { return a.id == resolved_id; });
-  if (it == config.llm.adapters.end()) {
+  const auto removed = std::ranges::remove_if(
+      config.llm.adapters, [&resolved_id](const LlmAdapter& a) { return a.id == resolved_id; });
+  if (removed.empty()) {
     fmt.PrintError(vinput::str::FmtStr(_("Adapter '%s' not found."), id));
     return 1;
   }
-  config.llm.adapters.erase(it, config.llm.adapters.end());
+  config.llm.adapters.erase(removed.begin(), removed.end());
 
   const auto managed_path =
       vinput::script::DefaultLocalScriptPath(vinput::script::Kind::kLlmAdapter, resolved_id);
@@ -510,8 +527,7 @@ int RunLlmConfigUpdateAdapter(const std::string& selector, bool all, bool force,
   bool any_updated = false;
   if (all) {
     for (const auto& adapter : config.llm.adapters) {
-      auto it = std::find_if(entries.begin(), entries.end(),
-                             [&](const auto& e) { return e.id == adapter.id; });
+      auto it = std::ranges::find_if(entries, [&](const auto& e) { return e.id == adapter.id; });
       if (it != entries.end()) {
         if (updateSingle(*it)) {
           any_updated = true;
@@ -525,8 +541,7 @@ int RunLlmConfigUpdateAdapter(const std::string& selector, bool all, bool force,
       fmt.PrintError(error);
       return 1;
     }
-    auto it =
-        std::find_if(entries.begin(), entries.end(), [&id](const auto& e) { return e.id == id; });
+    auto it = std::ranges::find_if(entries, [&id](const auto& e) { return e.id == id; });
     if (it == entries.end()) {
       fmt.PrintError(vinput::str::FmtStr(_("Adapter '%s' not found in registry."), selector));
       return 1;
@@ -555,7 +570,7 @@ int RunLlmConfigUpdateAdapter(const std::string& selector, bool all, bool force,
 
 int RunLlmConfigStartAdapter(const std::string& id, Formatter& fmt, const CliContext& ctx) {
   (void)ctx;
-  CoreConfig config = LoadCoreConfig();
+  const CoreConfig config = LoadCoreConfig();
   std::string error;
   const std::string resolved_id =
       vinput::cli::ResolveInstalledLlmAdapterSelector(config, id, &error);
@@ -574,7 +589,7 @@ int RunLlmConfigStartAdapter(const std::string& id, Formatter& fmt, const CliCon
 
 int RunLlmConfigStopAdapter(const std::string& id, Formatter& fmt, const CliContext& ctx) {
   (void)ctx;
-  CoreConfig config = LoadCoreConfig();
+  const CoreConfig config = LoadCoreConfig();
   std::string error;
   const std::string resolved_id =
       vinput::cli::ResolveInstalledLlmAdapterSelector(config, id, &error);
@@ -630,23 +645,25 @@ int RunLlmConfigPsAdapters(Formatter& fmt, const CliContext& ctx) {
       vinput::cli::FetchScriptDisplayMap(config, vinput::script::Kind::kLlmAdapter);
 
   if (ctx.json_output) {
-    nlohmann::json arr = nlohmann::json::array();
+    glz::json_t::array_t arr;
+    arr.reserve(config.llm.adapters.size());
     for (const auto& adapter : config.llm.adapters) {
       const auto it = installed_display_map.find(adapter.id);
       const pid_t pid = vinput::adapter::GetPid(adapter.id);
       const bool running = (pid > 0);
-      arr.push_back({
+      glz::json_t json_entry = {
           {"id", vinput::cli::HumanizeResourceId(installed_display_map, adapter.id)},
           {"machine_id", adapter.id},
           {"title", it == installed_display_map.end() ? "" : it->second.title},
           {"status", running ? "running" : "stopped"},
           {"running", running},
-          {"pid", running ? nlohmann::json(pid) : nullptr},
+          {"pid", running ? glz::json_t(static_cast<double>(pid)) : glz::json_t(nullptr)},
           {"auto_start", adapter.autoStart},
           {"command", adapter.command},
-      });
+      };
+      arr.emplace_back(std::move(json_entry));
     }
-    fmt.PrintJson(arr);
+    fmt.PrintJson(glz::json_t(std::move(arr)));
     return 0;
   }
 
@@ -699,11 +716,11 @@ int RunLlmConfigStatusAdapter(const std::string& id, Formatter& fmt, const CliCo
         {"title", title},
         {"status", running ? "running" : "stopped"},
         {"running", running},
-        {"pid", running ? nlohmann::json(pid) : nullptr},
+        {"pid", running ? glz::json_t(static_cast<double>(pid)) : glz::json_t(nullptr)},
         {"auto_start", adapter->autoStart},
         {"command", adapter->command},
-        {"args", adapter->args},
-        {"env", adapter->env},
+        {"args", vinput::json::FromStrings(adapter->args)},
+        {"env", vinput::json::FromStringMap(adapter->env)},
     });
     return 0;
   }
@@ -764,7 +781,7 @@ int RunLlmConfigEdit(const std::string& id, const std::string& baseUrl, const st
     it->api_key = std::string(vinput::str::Trim(apiKey));
   }
   if (hasExtraBody) {
-    nlohmann::json extra_json;
+    glz::json_t extra_json;
     if (!ParseExtraBody(extraBody, &extra_json, fmt)) {
       return 1;
     }
@@ -779,9 +796,9 @@ int RunLlmConfigEdit(const std::string& id, const std::string& baseUrl, const st
 }
 
 int RunLlmConfigTest(const std::string& id, Formatter& fmt, const CliContext& ctx) {
-  CoreConfig config = LoadCoreConfig();
+  const CoreConfig config = LoadCoreConfig();
   const auto* provider = ResolveLlmProvider(config, id);
-  if (!provider) {
+  if (provider == nullptr) {
     fmt.PrintError(vinput::str::FmtStr(_("LLM provider '%s' not found."), id));
     return 1;
   }
@@ -792,8 +809,9 @@ int RunLlmConfigTest(const std::string& id, Formatter& fmt, const CliContext& ct
   }
 
   std::string url = provider->base_url;
-  while (!url.empty() && url.back() == '/')
+  while (!url.empty() && url.back() == '/') {
     url.pop_back();
+  }
   url += vinput::llm::kOpenAiModelsPath;
 
   const std::string resolved_api_key = vinput::interpolate::InterpolateEnv(provider->api_key);
@@ -825,19 +843,20 @@ int RunLlmConfigTest(const std::string& id, Formatter& fmt, const CliContext& ct
     return 1;
   }
 
-  nlohmann::json response;
-  try {
-    response = nlohmann::json::parse(res.body);
-  } catch (const std::exception& e) {
-    fmt.PrintError(vinput::str::FmtStr(_("Invalid JSON response: %s"), e.what()));
+  glz::json_t response;
+  if (const auto ec = glz::read_json(response, res.body); bool(ec)) {
+    fmt.PrintError(vinput::str::FmtStr(_("Invalid JSON response: %s"),
+                                       glz::format_error(ec, res.body).c_str()));
     return 1;
   }
 
   std::vector<std::string> models;
-  if (response.contains("data") && response["data"].is_array()) {
-    for (const auto& item : response["data"]) {
-      if (item.contains("id") && item["id"].is_string()) {
-        models.push_back(item["id"].get<std::string>());
+  if (const auto* data = vinput::json::Find(response, "data");
+      data != nullptr && data->is_array()) {
+    for (const auto& item : data->get_array()) {
+      const auto* model_id = vinput::json::Find(item, "id");
+      if (model_id != nullptr && model_id->is_string()) {
+        models.push_back(model_id->get<std::string>());
       }
     }
   }
@@ -845,10 +864,10 @@ int RunLlmConfigTest(const std::string& id, Formatter& fmt, const CliContext& ct
   vinput::llm::SaveProviderModels(id, models);
 
   if (ctx.json_output) {
-    nlohmann::json result = {
+    const glz::json_t result = {
         {"status", "ok"},
         {"provider", id},
-        {"models", models},
+        {"models", vinput::json::FromStrings(models)},
     };
     fmt.PrintJson(result);
     return 0;
@@ -857,9 +876,10 @@ int RunLlmConfigTest(const std::string& id, Formatter& fmt, const CliContext& ct
   fmt.PrintSuccess(
       vinput::str::FmtStr(_("Connected to '%s'. Found %d model(s)."), id, (int)models.size()));
   if (!models.empty()) {
-    std::sort(models.begin(), models.end());
-    std::vector<std::string> headers_row = {_("MODEL")};
+    std::ranges::sort(models);
+    const std::vector<std::string> headers_row = {_("MODEL")};
     std::vector<std::vector<std::string>> rows;
+    rows.reserve(models.size());
     for (const auto& m : models) {
       rows.push_back({m});
     }

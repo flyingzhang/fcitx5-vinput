@@ -19,6 +19,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QObject>
 #include <QPlainTextEdit>
 #include <QPointer>
 #include <QPushButton>
@@ -27,13 +28,49 @@
 #include <QThreadPool>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QtCore/qbytearray.h>
+#include <QtCore/qjsonarray.h>
+#include <QtCore/qjsondocument.h>
+#include <QtCore/qnamespace.h>
+#include <QtCore/qobject.h>
+#include <QtCore/qobjectdefs.h>
+#include <QtCore/qpointer.h>
+#include <QtCore/qstring.h>
+#include <QtCore/qstringlist.h>
+#include <QtCore/qthreadpool.h>
+#include <QtCore/qtimer.h>
+#include <QtCore/qurl.h>
+#include <QtGui/qfontmetrics.h>
+#include <QtNetwork/qnetworkaccessmanager.h>
+#include <QtNetwork/qnetworkreply.h>
+#include <QtNetwork/qnetworkrequest.h>
+#include <QtWidgets/qboxlayout.h>
 #include <QtWidgets/qcheckbox.h>
+#include <QtWidgets/qcombobox.h>
+#include <QtWidgets/qdialog.h>
+#include <QtWidgets/qdialogbuttonbox.h>
+#include <QtWidgets/qformlayout.h>
+#include <QtWidgets/qlabel.h>
+#include <QtWidgets/qlineedit.h>
+#include <QtWidgets/qlistwidget.h>
+#include <QtWidgets/qmessagebox.h>
+#include <QtWidgets/qplaintextedit.h>
+#include <QtWidgets/qpushbutton.h>
+#include <QtWidgets/qspinbox.h>
+#include <QtWidgets/qtextedit.h>
+#include <QtWidgets/qwidget.h>
 #include <algorithm>
+#include <cstddef>
 #include <filesystem>
-#include <nlohmann/json.hpp>
+#include <glaze/core/common.hpp>
+#include <glaze/json/json_t.hpp>
+#include <glaze/json/read.hpp>
 #include <system_error>
+#include <utility>
 #include <vector>
 
+#include "common/config/core_config.h"
+#include "common/json/json_access.h"
 #include "common/llm/adapter_manager.h"
 #include "common/llm/defaults.h"
 #include "common/llm/provider_model_cache.h"
@@ -69,39 +106,44 @@ void FromSceneConfig(CoreConfig::Scenes& sc, const vinput::scene::Config& c) {
 // Parses the Extra body JSON text from a dialog. Returns true with `out` set
 // on success (or empty-object when text is blank); false after showing a
 // QMessageBox on parse error or non-object payloads.
-bool ParseExtraBodyInput(QWidget* parent, const QString& text, nlohmann::json* out) {
+bool ParseExtraBodyInput(QWidget* parent, const QString& text, glz::json_t* out) {
   const std::string trimmed = text.trimmed().toStdString();
+  *out = glz::json_t(glz::json_t::object_t{});
   if (trimmed.empty()) {
-    *out = nlohmann::json::object();
     return true;
   }
-  try {
-    auto parsed = nlohmann::json::parse(trimmed);
-    if (!parsed.is_object()) {
-      QMessageBox::warning(
-          parent, LlmPage::tr("Error"),
-          LlmPage::tr("Extra body must be a JSON object (e.g. {\"enable_thinking\": false})."));
-      return false;
-    }
-    *out = std::move(parsed);
-    return true;
-  } catch (const std::exception& e) {
+  glz::json_t parsed;
+  if (!vinput::json::IsSingleJsonValue(trimmed)) {
     QMessageBox::warning(
         parent, LlmPage::tr("Error"),
-        LlmPage::tr("Invalid extra_body JSON: %1").arg(QString::fromUtf8(e.what())));
+        LlmPage::tr("Extra body must be a JSON object (e.g. {\"enable_thinking\": false})."));
     return false;
   }
+  if (const auto ec = glz::read_json(parsed, trimmed); bool(ec)) {
+    QMessageBox::warning(parent, LlmPage::tr("Error"),
+                         LlmPage::tr("Invalid extra_body JSON: %1")
+                             .arg(QString::fromStdString(glz::format_error(ec, trimmed))));
+    return false;
+  }
+  if (!parsed.is_object()) {
+    QMessageBox::warning(
+        parent, LlmPage::tr("Error"),
+        LlmPage::tr("Extra body must be a JSON object (e.g. {\"enable_thinking\": false})."));
+    return false;
+  }
+  *out = std::move(parsed);
+  return true;
 }
 
-QPlainTextEdit* MakeExtraBodyEditor(const nlohmann::json* prefill = nullptr) {
+QPlainTextEdit* MakeExtraBodyEditor(const glz::json_t* prefill = nullptr) {
   auto* edit = new QPlainTextEdit();
   edit->setPlaceholderText(LlmPage::tr("Optional JSON object merged into each request body, e.g. "
                                        "{\"enable_thinking\": false}"));
   edit->setTabChangesFocus(true);
   const QFontMetrics fm(edit->font());
-  edit->setFixedHeight(fm.lineSpacing() * 5 + 8);
-  if (prefill && prefill->is_object() && !prefill->empty()) {
-    edit->setPlainText(QString::fromStdString(prefill->dump(2)));
+  edit->setFixedHeight((fm.lineSpacing() * 5) + 8);
+  if (prefill != nullptr && prefill->is_object() && !prefill->empty()) {
+    edit->setPlainText(QString::fromStdString(vinput::json::ToPrettyText(*prefill)));
   }
   return edit;
 }
@@ -110,13 +152,16 @@ constexpr int kDefaultTimeoutMs = vinput::scene::kDefaultTimeoutMs;
 constexpr int kDefaultUiLlmMaxCandidates = 3;
 
 QString SceneLabelForGui(const vinput::scene::Definition& scene) {
-  if (scene.id == vinput::scene::kRawSceneId || scene.label == vinput::scene::kRawSceneLabelKey)
+  if (scene.id == vinput::scene::kRawSceneId || scene.label == vinput::scene::kRawSceneLabelKey) {
     return LlmPage::tr("Raw");
+  }
   if (scene.id == vinput::scene::kCommandSceneId ||
-      scene.label == vinput::scene::kCommandSceneLabelKey)
+      scene.label == vinput::scene::kCommandSceneLabelKey) {
     return LlmPage::tr("Command");
-  if (!scene.label.empty())
+  }
+  if (!scene.label.empty()) {
     return QString::fromStdString(scene.label);
+  }
   return QString::fromStdString(scene.id);
 }
 
@@ -130,16 +175,16 @@ QString AdapterTitleForGui(const std::string& adapter_id) {
 
 // Convert between AdapterData (GUI dialog) and LlmAdapter (config).
 AdapterData AdapterDataFromConfig(const LlmAdapter& a) {
-  return {a.id, a.command, a.args, a.env, a.autoStart};
+  return {.id = a.id, .command = a.command, .args = a.args, .env = a.env, .autoStart = a.autoStart};
 }
 
 LlmAdapter LlmAdapterFromDialog(const AdapterData& d) {
-  return {d.id, d.command, d.args, d.env, d.autoStart};
+  return {.id = d.id, .command = d.command, .args = d.args, .env = d.env, .autoStart = d.autoStart};
 }
 
 template <typename Callback>
 void RunAdapterControlAsync(LlmPage* page, std::string adapter_id, bool start, Callback callback) {
-  QPointer<LlmPage> self(page);
+  const QPointer<LlmPage> self(page);
   QThreadPool::globalInstance()->start(
       [self, adapter_id = std::move(adapter_id), start, callback = std::move(callback)]() mutable {
         vinput::cli::DbusClient dbus;
@@ -157,12 +202,13 @@ void RunAdapterControlAsync(LlmPage* page, std::string adapter_id, bool start, C
 
 } // namespace
 
-LlmPage::LlmPage(QWidget* parent) : QWidget(parent) {
+LlmPage::LlmPage(QWidget* parent)
+    : QWidget(parent), listProviders_(new QListWidget()), listAdapters_(new QListWidget()),
+      listScenes_(new QListWidget()) {
   auto* layout = new QVBoxLayout(this);
 
   layout->addWidget(new QLabel(tr("<b>Providers</b>")));
   auto* listLayout = new QHBoxLayout();
-  listProviders_ = new QListWidget();
   listLayout->addWidget(listProviders_);
 
   auto* btnLayout = new QVBoxLayout();
@@ -179,7 +225,6 @@ LlmPage::LlmPage(QWidget* parent) : QWidget(parent) {
   layout->addLayout(listLayout);
 
   auto* adapterLayout = new QHBoxLayout();
-  listAdapters_ = new QListWidget();
   adapterLayout->addWidget(listAdapters_);
 
   auto* adapterBtnLayout = new QVBoxLayout();
@@ -202,7 +247,6 @@ LlmPage::LlmPage(QWidget* parent) : QWidget(parent) {
   // Scenes section
   layout->addWidget(new QLabel(tr("<b>Scenes</b>")));
   auto* sceneLayout = new QHBoxLayout();
-  listScenes_ = new QListWidget();
   sceneLayout->addWidget(listScenes_);
 
   auto* sceneBtnLayout = new QVBoxLayout();
@@ -247,12 +291,12 @@ void LlmPage::reload() {
 
 void LlmPage::refreshLlmList() {
   listProviders_->clear();
-  CoreConfig config = ConfigManager::Get().Load();
+  const CoreConfig config = ConfigManager::Get().Load();
 
   for (const auto& provider : config.llm.providers) {
-    QString name = QString::fromStdString(provider.id);
-    QString base_url = QString::fromStdString(provider.base_url);
-    QString display = QString("%1 @ %2").arg(name, base_url);
+    const QString name = QString::fromStdString(provider.id);
+    const QString base_url = QString::fromStdString(provider.base_url);
+    const QString display = QString("%1 @ %2").arg(name, base_url);
 
     auto* item = new QListWidgetItem(display, listProviders_);
     item->setData(Qt::UserRole, name);
@@ -261,16 +305,16 @@ void LlmPage::refreshLlmList() {
 
 void LlmPage::refreshAdapterList() {
   listAdapters_->clear();
-  CoreConfig config = ConfigManager::Get().Load();
+  const CoreConfig config = ConfigManager::Get().Load();
 
   for (const auto& adapter : config.llm.adapters) {
-    QString id = QString::fromStdString(adapter.id);
-    QString title = AdapterTitleForGui(adapter.id);
-    bool running = vinput::adapter::IsRunning(adapter.id);
+    const QString id = QString::fromStdString(adapter.id);
+    const QString title = AdapterTitleForGui(adapter.id);
+    const bool running = vinput::adapter::IsRunning(adapter.id);
 
     QString display = title + " · " + (running ? tr("running") : tr("stopped"));
     display += " · " + (adapter.autoStart ? tr("autostart") : tr("manual"));
-    QString command = QString::fromStdString(adapter.command);
+    const QString command = QString::fromStdString(adapter.command);
     if (!command.isEmpty()) {
       display += " · " + command;
     }
@@ -288,16 +332,26 @@ void LlmPage::refreshAdapterList() {
       tooltip += "\n" + tr("Command: %1").arg(command);
     }
     if (!adapter.args.empty()) {
-      QStringList argsList;
-      for (const auto& a : adapter.args)
-        argsList << QString::fromStdString(a);
-      tooltip += "\n" + tr("Args: %1").arg(argsList.join(" "));
+      std::string joined_args;
+      for (const auto& a : adapter.args) {
+        if (!joined_args.empty()) {
+          joined_args += ' ';
+        }
+        joined_args += a;
+      }
+      tooltip += "\n" + tr("Args: %1").arg(QString::fromStdString(joined_args));
     }
     if (!adapter.env.empty()) {
-      QStringList envList;
-      for (const auto& [k, v] : adapter.env)
-        envList << QString::fromStdString(k) + "=" + QString::fromStdString(v);
-      tooltip += "\n" + tr("Env: %1").arg(envList.join(" "));
+      std::string joined_env;
+      for (const auto& [k, v] : adapter.env) {
+        if (!joined_env.empty()) {
+          joined_env += ' ';
+        }
+        joined_env += k;
+        joined_env += '=';
+        joined_env += v;
+      }
+      tooltip += "\n" + tr("Env: %1").arg(QString::fromStdString(joined_env));
     }
     item->setToolTip(tooltip.trimmed());
   }
@@ -329,8 +383,9 @@ void LlmPage::onLlmAdd() {
   dlgLayout->addLayout(form);
   dlgLayout->addWidget(buttons);
 
-  if (dialog.exec() != QDialog::Accepted)
+  if (dialog.exec() != QDialog::Accepted) {
     return;
+  }
 
   const QString name_text = editName->text().trimmed();
   const QString base_url_text = editBaseUrl->text().trimmed();
@@ -340,7 +395,7 @@ void LlmPage::onLlmAdd() {
     return;
   }
 
-  nlohmann::json extra_body;
+  glz::json_t extra_body;
   if (!ParseExtraBodyInput(this, editExtraBody->toPlainText(), &extra_body)) {
     return;
   }
@@ -363,22 +418,24 @@ void LlmPage::onLlmAdd() {
     return;
   }
   refreshLlmList();
-  emit configChanged();
+  configChanged();
 }
 
 void LlmPage::onLlmEdit() {
   auto* item = listProviders_->currentItem();
-  if (!item)
+  if (item == nullptr) {
     return;
+  }
 
   QString provider_name = item->data(Qt::UserRole).toString();
 
   CoreConfig config = ConfigManager::Get().Load();
   const LlmProvider* prov = ResolveLlmProvider(config, provider_name.toStdString());
-  if (!prov)
+  if (prov == nullptr) {
     return;
+  }
 
-  QString current_base_url = QString::fromStdString(prov->base_url);
+  const QString current_base_url = QString::fromStdString(prov->base_url);
 
   QDialog dialog(this);
   dialog.setWindowTitle(tr("Edit LLM Provider"));
@@ -406,8 +463,9 @@ void LlmPage::onLlmEdit() {
   dlgLayout->addLayout(form);
   dlgLayout->addWidget(buttons);
 
-  if (dialog.exec() != QDialog::Accepted)
+  if (dialog.exec() != QDialog::Accepted) {
     return;
+  }
 
   const QString base_url_text = editBaseUrl->text().trimmed();
   QString validation_error;
@@ -416,14 +474,14 @@ void LlmPage::onLlmEdit() {
     return;
   }
 
-  nlohmann::json extra_body;
+  glz::json_t extra_body;
   if (!ParseExtraBodyInput(this, editExtraBody->toPlainText(), &extra_body)) {
     return;
   }
 
   auto& providers = config.llm.providers;
-  auto it = std::find_if(providers.begin(), providers.end(),
-                         [&](const LlmProvider& p) { return p.id == provider_name.toStdString(); });
+  auto it = std::ranges::find_if(
+      providers, [&](const LlmProvider& p) { return p.id == provider_name.toStdString(); });
   if (it != providers.end()) {
     it->base_url = base_url_text.toStdString();
     const QString api_key_text = editApiKey->text().trimmed();
@@ -438,25 +496,27 @@ void LlmPage::onLlmEdit() {
   }
 
   refreshLlmList();
-  emit configChanged();
+  configChanged();
 }
 
 void LlmPage::onLlmRemove() {
   auto* item = listProviders_->currentItem();
-  if (!item)
+  if (item == nullptr) {
     return;
+  }
 
   QString provider_name = item->data(Qt::UserRole).toString();
   auto response = QMessageBox::question(
       this, tr("Confirm"),
       tr("Are you sure you want to remove LLM provider '%1'?").arg(provider_name));
-  if (response != QMessageBox::Yes)
+  if (response != QMessageBox::Yes) {
     return;
+  }
 
   CoreConfig config = ConfigManager::Get().Load();
   auto& providers = config.llm.providers;
-  auto it = std::find_if(providers.begin(), providers.end(),
-                         [&](const LlmProvider& p) { return p.id == provider_name.toStdString(); });
+  auto it = std::ranges::find_if(
+      providers, [&](const LlmProvider& p) { return p.id == provider_name.toStdString(); });
   int cleared_scene_refs = 0;
   if (it != providers.end()) {
     providers.erase(it);
@@ -474,7 +534,7 @@ void LlmPage::onLlmRemove() {
 
   refreshLlmList();
   refreshSceneList();
-  emit configChanged();
+  configChanged();
   if (cleared_scene_refs > 0) {
     QMessageBox::information(this, tr("Scenes Updated"),
                              tr("Removed provider '%1' and cleared it from %2 scene(s).")
@@ -485,13 +545,14 @@ void LlmPage::onLlmRemove() {
 
 void LlmPage::onLlmTest() {
   auto* item = listProviders_->currentItem();
-  if (!item)
+  if (item == nullptr) {
     return;
+  }
 
-  QString provider_id = item->data(Qt::UserRole).toString();
-  CoreConfig config = ConfigManager::Get().Load();
+  const QString provider_id = item->data(Qt::UserRole).toString();
+  const CoreConfig config = ConfigManager::Get().Load();
   const LlmProvider* provider = ResolveLlmProvider(config, provider_id.toStdString());
-  if (!provider) {
+  if (provider == nullptr) {
     QMessageBox::warning(this, tr("Error"), tr("Provider '%1' not found.").arg(provider_id));
     return;
   }
@@ -501,8 +562,9 @@ void LlmPage::onLlmTest() {
     QMessageBox::warning(this, tr("Error"), tr("Provider base_url is empty."));
     return;
   }
-  while (!url.isEmpty() && url.endsWith(u'/'))
+  while (!url.isEmpty() && url.endsWith(u'/')) {
     url.chop(1);
+  }
   url += vinput::llm::kOpenAiModelsPath;
 
   btnLlmTest_->setEnabled(false);
@@ -513,7 +575,7 @@ void LlmPage::onLlmTest() {
   req.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
   const std::string resolved_key = vinput::interpolate::InterpolateEnv(provider->api_key);
   if (!resolved_key.empty()) {
-    QByteArray bearer =
+    const QByteArray bearer =
         QByteArray(vinput::llm::kBearerPrefix) + QByteArray::fromStdString(resolved_key);
     req.setRawHeader(vinput::llm::kAuthorizationHeader, bearer);
   }
@@ -522,8 +584,9 @@ void LlmPage::onLlmTest() {
   auto* timeout = new QTimer(reply);
   timeout->setSingleShot(true);
   QObject::connect(timeout, &QTimer::timeout, reply, [reply]() {
-    if (!reply->isFinished())
+    if (!reply->isFinished()) {
       reply->abort();
+    }
   });
   timeout->start(10000);
 
@@ -539,20 +602,21 @@ void LlmPage::onLlmTest() {
               tr("Connection to '%1' failed:\n%2").arg(provider_id, reply->errorString()));
         } else {
           QJsonParseError parseError;
-          QJsonDocument doc = QJsonDocument::fromJson(reply->readAll(), &parseError);
+          const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll(), &parseError);
           if (parseError.error != QJsonParseError::NoError || !doc.isObject() ||
               !doc.object().value("data").isArray()) {
             QMessageBox::warning(this, tr("Test Failed"),
                                  tr("Invalid response from '%1'.").arg(provider_id));
           } else {
-            QJsonArray data = doc.object().value("data").toArray();
-            QStringList models;
+            const QJsonArray data = doc.object().value("data").toArray();
+            std::vector<QString> models;
             for (const auto& v : data) {
-              QString id = v.toObject().value("id").toString();
-              if (!id.isEmpty())
-                models.append(id);
+              const QString id = v.toObject().value("id").toString();
+              if (!id.isEmpty()) {
+                models.push_back(id);
+              }
             }
-            models.sort();
+            std::ranges::sort(models);
             std::vector<std::string> models_vec;
             models_vec.reserve(models.size());
             for (const auto& m : models) {
@@ -561,8 +625,15 @@ void LlmPage::onLlmTest() {
             vinput::llm::SaveProviderModels(provider_id.toStdString(), models_vec);
             QString msg =
                 tr("Connected to '%1'.\nFound %2 model(s).").arg(provider_id).arg(models.size());
-            if (!models.isEmpty()) {
-              msg += "\n\n" + models.join("\n");
+            if (!models.empty()) {
+              QString joined_models;
+              for (const auto& m : models) {
+                if (!joined_models.isEmpty()) {
+                  joined_models += '\n';
+                }
+                joined_models += m;
+              }
+              msg += "\n\n" + joined_models;
             }
             QMessageBox::information(this, tr("Test Succeeded"), msg);
           }
@@ -574,10 +645,11 @@ void LlmPage::onLlmTest() {
 
 void LlmPage::onAdapterEdit() {
   auto* item = listAdapters_->currentItem();
-  if (!item)
+  if (item == nullptr) {
     return;
+  }
 
-  QString adapter_id = item->data(Qt::UserRole).toString();
+  const QString adapter_id = item->data(Qt::UserRole).toString();
 
   CoreConfig config = ConfigManager::Get().Load();
   AdapterData current;
@@ -611,7 +683,7 @@ void LlmPage::onAdapterEdit() {
   }
 
   refreshAdapterList();
-  emit configChanged();
+  configChanged();
 }
 
 void LlmPage::onAdapterRemove() {
@@ -640,12 +712,12 @@ void LlmPage::onAdapterRemove() {
   }
 
   CoreConfig config = ConfigManager::Get().Load();
-  auto it = std::remove_if(config.llm.adapters.begin(), config.llm.adapters.end(),
-                           [&](const LlmAdapter& a) { return a.id == adapter_id.toStdString(); });
-  if (it == config.llm.adapters.end()) {
+  const auto removed = std::ranges::remove_if(
+      config.llm.adapters, [&](const LlmAdapter& a) { return a.id == adapter_id.toStdString(); });
+  if (removed.empty()) {
     return;
   }
-  config.llm.adapters.erase(it, config.llm.adapters.end());
+  config.llm.adapters.erase(removed.begin(), removed.end());
 
   const auto managed_path = vinput::script::DefaultLocalScriptPath(
       vinput::script::Kind::kLlmAdapter, adapter_id.toStdString());
@@ -660,7 +732,7 @@ void LlmPage::onAdapterRemove() {
   }
 
   refreshAdapterList();
-  emit configChanged();
+  configChanged();
 }
 
 void LlmPage::updateAdapterButtons() {
@@ -681,8 +753,9 @@ void LlmPage::updateAdapterButtons() {
 
 void LlmPage::onAdapterStart() {
   auto* item = listAdapters_->currentItem();
-  if (!item)
+  if (item == nullptr) {
     return;
+  }
 
   const QString adapter_id = item->data(Qt::UserRole).toString();
   QString adapter_title = item->data(Qt::UserRole + 2).toString();
@@ -707,8 +780,9 @@ void LlmPage::onAdapterStart() {
 
 void LlmPage::onAdapterStop() {
   auto* item = listAdapters_->currentItem();
-  if (!item)
+  if (item == nullptr) {
     return;
+  }
 
   const QString adapter_id = item->data(Qt::UserRole).toString();
   btnAdapterStart_->setEnabled(false);
@@ -727,13 +801,14 @@ void LlmPage::onAdapterStop() {
 
 void LlmPage::refreshSceneList() {
   listScenes_->clear();
-  CoreConfig config = ConfigManager::Get().Load();
+  const CoreConfig config = ConfigManager::Get().Load();
 
   for (const auto& scene : config.scenes.definitions) {
     QString label = SceneLabelForGui(scene);
-    bool active = (scene.id == config.scenes.activeScene);
-    if (active)
+    const bool active = (scene.id == config.scenes.activeScene);
+    if (active) {
       label += " *";
+    }
     auto* item = new QListWidgetItem(label, listScenes_);
     item->setData(Qt::UserRole, QString::fromStdString(scene.id));
   }
@@ -794,8 +869,9 @@ void LlmPage::onSceneAdd() {
   dlgLayout->addLayout(form);
   dlgLayout->addWidget(buttons);
 
-  if (dialog.exec() != QDialog::Accepted)
+  if (dialog.exec() != QDialog::Accepted) {
     return;
+  }
 
   vinput::scene::Definition def;
   def.id = editId->text().trimmed().toStdString();
@@ -822,21 +898,23 @@ void LlmPage::onSceneAdd() {
     return;
   }
   refreshSceneList();
-  emit configChanged();
+  configChanged();
 }
 
 void LlmPage::onSceneEdit() {
   auto* item = listScenes_->currentItem();
-  if (!item)
+  if (item == nullptr) {
     return;
+  }
 
-  QString scene_id = item->data(Qt::UserRole).toString();
+  const QString scene_id = item->data(Qt::UserRole).toString();
 
   CoreConfig config = ConfigManager::Get().Load();
   vinput::scene::Config sc = ToSceneConfig(config.scenes);
   const vinput::scene::Definition* found = vinput::scene::Find(sc, scene_id.toStdString());
-  if (!found)
+  if (found == nullptr) {
     return;
+  }
 
   QDialog dialog(this);
   dialog.setWindowTitle(tr("Edit Scene"));
@@ -895,8 +973,9 @@ void LlmPage::onSceneEdit() {
   dlgLayout->addLayout(form);
   dlgLayout->addWidget(buttons);
 
-  if (dialog.exec() != QDialog::Accepted)
+  if (dialog.exec() != QDialog::Accepted) {
     return;
+  }
 
   vinput::scene::Definition def = *found;
   def.label = editLabel->text().trimmed().toStdString();
@@ -921,15 +1000,16 @@ void LlmPage::onSceneEdit() {
     return;
   }
   refreshSceneList();
-  emit configChanged();
+  configChanged();
 }
 
 void LlmPage::onSceneRemove() {
   auto* item = listScenes_->currentItem();
-  if (!item)
+  if (item == nullptr) {
     return;
+  }
 
-  QString scene_id = item->data(Qt::UserRole).toString();
+  const QString scene_id = item->data(Qt::UserRole).toString();
   CoreConfig config = ConfigManager::Get().Load();
   vinput::scene::Config sc = ToSceneConfig(config.scenes);
   QString scene_label = scene_id;
@@ -938,8 +1018,9 @@ void LlmPage::onSceneRemove() {
   }
   auto response = QMessageBox::question(
       this, tr("Confirm"), tr("Are you sure you want to remove scene '%1'?").arg(scene_label));
-  if (response != QMessageBox::Yes)
+  if (response != QMessageBox::Yes) {
     return;
+  }
 
   std::string err;
   if (!vinput::scene::RemoveScene(&sc, scene_id.toStdString(), true, &err)) {
@@ -952,15 +1033,16 @@ void LlmPage::onSceneRemove() {
     return;
   }
   refreshSceneList();
-  emit configChanged();
+  configChanged();
 }
 
 void LlmPage::onSceneSetActive() {
   auto* item = listScenes_->currentItem();
-  if (!item)
+  if (item == nullptr) {
     return;
+  }
 
-  QString scene_id = item->data(Qt::UserRole).toString();
+  const QString scene_id = item->data(Qt::UserRole).toString();
 
   CoreConfig config = vinput::gui::ConfigManager::Get().Load();
   std::string err;
@@ -978,7 +1060,7 @@ void LlmPage::onSceneSetActive() {
   }
 
   refreshSceneList();
-  emit configChanged();
+  configChanged();
 }
 
 } // namespace vinput::gui

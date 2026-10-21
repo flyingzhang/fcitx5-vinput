@@ -1,38 +1,44 @@
 #include "cli/config/scene_actions.h"
 
-#include <nlohmann/json.hpp>
+#include <glaze/json/json_t.hpp>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "common/config/core_config.h"
+#include "common/config/core_config_types.h"
 #include "common/i18n.h"
 #include "common/scene/postprocess_scene.h"
 #include "common/utils/string_utils.h"
 
+#include "cli/utils/cli_context.h"
 #include "cli/utils/cli_helpers.h"
+#include "cli/utils/formatter.h"
 
 int RunSceneConfigList(Formatter& fmt, const CliContext& ctx) {
-  CoreConfig config = LoadCoreConfig();
+  const CoreConfig config = LoadCoreConfig();
   const auto& scenes = config.scenes.definitions;
 
   if (ctx.json_output) {
-    nlohmann::json arr = nlohmann::json::array();
+    glz::json_t::array_t arr;
+    arr.reserve(scenes.size());
     for (const auto& scene : scenes) {
-      bool active = (scene.id == config.scenes.activeScene);
-      arr.push_back({{"id", scene.id},
-                     {"label", vinput::scene::DisplayLabel(scene)},
-                     {"prompt", scene.prompt},
-                     {"provider_id", scene.provider_id},
-                     {"model", scene.model},
-                     {"count", scene.llm_max_candidates},
-                     {"timeout_ms", scene.timeout_ms},
-                     {"context_lines", scene.context_lines},
-                     {"raw_cand", scene.raw_cand},
-                     {"raw_prev", scene.raw_prev},
-                     {"builtin", scene.builtin},
-                     {"active", active}});
+      const bool active = (scene.id == config.scenes.activeScene);
+      glz::json_t json_entry = {{"id", scene.id},
+                                {"label", vinput::scene::DisplayLabel(scene)},
+                                {"prompt", scene.prompt},
+                                {"provider_id", scene.provider_id},
+                                {"model", scene.model},
+                                {"count", scene.llm_max_candidates},
+                                {"timeout_ms", scene.timeout_ms},
+                                {"context_lines", scene.context_lines},
+                                {"raw_cand", scene.raw_cand},
+                                {"raw_prev", scene.raw_prev},
+                                {"builtin", scene.builtin},
+                                {"active", active}};
+      arr.emplace_back(std::move(json_entry));
     }
-    fmt.PrintJson(arr);
+    fmt.PrintJson(glz::json_t(std::move(arr)));
     return 0;
   }
 
@@ -40,10 +46,10 @@ int RunSceneConfigList(Formatter& fmt, const CliContext& ctx) {
                                             _("COUNT"), _("RAW_CAND"), _("RAW_PREV"), _("STATUS")};
   std::vector<std::vector<std::string>> rows;
   for (const auto& scene : scenes) {
-    std::string label = vinput::scene::DisplayLabel(scene);
-    std::string status = (scene.id == config.scenes.activeScene) ? "[*]" : "[ ]";
-    std::string provider = scene.provider_id.empty() ? "-" : scene.provider_id;
-    std::string model = scene.model.empty() ? "-" : scene.model;
+    const std::string label = vinput::scene::DisplayLabel(scene);
+    const std::string status = (scene.id == config.scenes.activeScene) ? "[*]" : "[ ]";
+    const std::string provider = scene.provider_id.empty() ? "-" : scene.provider_id;
+    const std::string model = scene.model.empty() ? "-" : scene.model;
     rows.push_back({scene.id, label, provider, model, std::to_string(scene.llm_max_candidates),
                     scene.raw_cand ? _("yes") : _("no"), scene.raw_prev ? _("yes") : _("no"),
                     status});
@@ -79,8 +85,9 @@ int RunSceneConfigAdd(const std::string& id, const std::string& label, const std
   }
   FromSceneConfig(config.scenes, scene_config);
 
-  if (!SaveConfigOrFail(config, fmt))
+  if (!SaveConfigOrFail(config, fmt)) {
     return 1;
+  }
 
   fmt.PrintSuccess(vinput::str::FmtStr(_("Scene '%s' added."), id));
   return 0;
@@ -98,8 +105,9 @@ int RunSceneConfigUse(const std::string& id, Formatter& fmt, const CliContext& c
   }
   FromSceneConfig(config.scenes, scene_config);
 
-  if (!SaveConfigOrFail(config, fmt))
+  if (!SaveConfigOrFail(config, fmt)) {
     return 1;
+  }
 
   fmt.PrintSuccess(vinput::str::FmtStr(_("Default scene set to '%s'."), id));
   return 0;
@@ -117,8 +125,9 @@ int RunSceneConfigRemove(const std::string& id, bool force, Formatter& fmt, cons
   }
   FromSceneConfig(config.scenes, scene_config);
 
-  if (!SaveConfigOrFail(config, fmt))
+  if (!SaveConfigOrFail(config, fmt)) {
     return 1;
+  }
 
   fmt.PrintSuccess(vinput::str::FmtStr(_("Scene '%s' removed."), id));
   return 0;
@@ -141,7 +150,7 @@ int RunSceneConfigEdit(const std::string& id, const std::string& label, const st
       break;
     }
   }
-  if (!existing) {
+  if (existing == nullptr) {
     fmt.PrintError(vinput::str::FmtStr(_("Scene '%s' not found."), id));
     return 1;
   }

@@ -1,16 +1,27 @@
 #include "daemon/asr/runtime/recognition_session_manager.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
+#include <functional>
+#include <glaze/json/json_t.hpp>
+#include <memory>
+#include <mutex>
+#include <span>
+#include <string>
 #include <utility>
+#include <variant>
+#include <vector>
 
 #include "common/config/core_config.h"
 #include "common/config/core_config_types.h"
 #include "common/i18n.h"
+#include "common/json/json_access.h"
 #include "common/utils/debug_log.h"
 #include "common/utils/time_utils.h"
 
 #include "daemon/asr/runtime/backend_factory.h"
+#include "daemon/asr/runtime/recognition_contract.h"
 
 namespace vinput::daemon::asr {
 
@@ -46,7 +57,7 @@ public:
 
   bool Finish(std::string* error) override {
     if (!session_) {
-      if (error) {
+      if (error != nullptr) {
         *error = "Recognition session is not initialized.";
       }
       return false;
@@ -74,8 +85,8 @@ private:
 
 bool ShouldDisableAsr(const CoreConfig& config, std::string* reason) {
   const AsrProvider* provider = ResolveActiveAsrProvider(config);
-  if (!provider) {
-    if (reason) {
+  if (provider == nullptr) {
+    if (reason != nullptr) {
       *reason = _("No active ASR provider configured.");
     }
     return true;
@@ -85,15 +96,15 @@ bool ShouldDisableAsr(const CoreConfig& config, std::string* reason) {
 }
 
 std::string BuildRuntimeSignature(const CoreConfig& config) {
-  nlohmann::ordered_json j;
+  glz::json_t j = glz::json_t(glz::json_t::object_t{});
   j["active_provider"] = config.asr.activeProvider;
 
   const AsrProvider* provider = ResolveActiveAsrProvider(config);
-  if (!provider) {
-    return j.dump();
+  if (provider == nullptr) {
+    return vinput::json::ToText(j);
   }
 
-  nlohmann::ordered_json provider_json;
+  glz::json_t provider_json = glz::json_t(glz::json_t::object_t{});
   provider_json["id"] = AsrProviderId(*provider);
   provider_json["type"] = std::string(AsrProviderType(*provider));
   provider_json["timeout_ms"] = AsrProviderTimeoutMs(*provider);
@@ -104,12 +115,12 @@ std::string BuildRuntimeSignature(const CoreConfig& config) {
     provider_json["vad_enabled"] = config.asr.vad.enabled;
   } else if (const auto* command = std::get_if<CommandAsrProvider>(provider)) {
     provider_json["command"] = command->command;
-    provider_json["args"] = command->args;
-    provider_json["env"] = command->env;
+    provider_json["args"] = vinput::json::FromStrings(command->args);
+    provider_json["env"] = vinput::json::FromStringMap(command->env);
   }
 
   j["provider"] = std::move(provider_json);
-  return j.dump();
+  return vinput::json::ToText(j);
 }
 
 void LogActiveBackend(const CoreConfig& config) {
@@ -136,9 +147,9 @@ bool RecognitionSessionManager::Initialize(const CoreConfig& settings,
                                            std::string* disabled_reason) {
   std::string disabled_state_reason;
   if (ShouldDisableAsr(settings, &disabled_state_reason)) {
-    std::lock_guard<std::mutex> lock(state_mutex_);
+    const std::scoped_lock lock(state_mutex_);
     ApplyDisabledStateLocked();
-    if (disabled_reason) {
+    if (disabled_reason != nullptr) {
       *disabled_reason = std::move(disabled_state_reason);
     }
     return false;
@@ -148,26 +159,26 @@ bool RecognitionSessionManager::Initialize(const CoreConfig& settings,
   std::string error;
   if (!CreatePreparedBackend(settings, &prepared, &error)) {
     {
-      std::lock_guard<std::mutex> lock(state_mutex_);
+      const std::scoped_lock lock(state_mutex_);
       ResetEffectiveBackendLocked();
       target_backend_signature_.clear();
       last_reload_error_ = error;
     }
-    if (disabled_reason) {
+    if (disabled_reason != nullptr) {
       *disabled_reason = error;
     }
     return false;
   }
 
   if (!ActivatePreparedBackend(std::move(prepared), &error)) {
-    if (disabled_reason) {
+    if (disabled_reason != nullptr) {
       *disabled_reason = error;
     }
     return false;
   }
 
   EnsureReloadWorkerStarted();
-  if (disabled_reason) {
+  if (disabled_reason != nullptr) {
     disabled_reason->clear();
   }
   return true;
@@ -176,9 +187,9 @@ bool RecognitionSessionManager::Initialize(const CoreConfig& settings,
 bool RecognitionSessionManager::SynchronizeBackend(const CoreConfig& settings, std::string* error) {
   std::string disabled_reason;
   if (ShouldDisableAsr(settings, &disabled_reason)) {
-    std::lock_guard<std::mutex> lock(state_mutex_);
+    const std::scoped_lock lock(state_mutex_);
     ApplyDisabledStateLocked();
-    if (error) {
+    if (error != nullptr) {
       error->clear();
     }
     return true;
@@ -188,14 +199,14 @@ bool RecognitionSessionManager::SynchronizeBackend(const CoreConfig& settings, s
 
   const std::string signature = BuildRuntimeSignature(settings);
   {
-    std::lock_guard<std::mutex> lock(state_mutex_);
+    const std::scoped_lock lock(state_mutex_);
     if (effective_backend_ && effective_backend_signature_ == signature && !reload_in_progress_) {
       const AsrProvider* provider = ResolveActiveAsrProvider(settings);
-      target_provider_id_ = provider ? AsrProviderId(*provider) : std::string{};
+      target_provider_id_ = provider != nullptr ? AsrProviderId(*provider) : std::string{};
       target_model_id_ = ResolvePreferredLocalModel(settings);
       target_backend_signature_ = signature;
       last_reload_error_.clear();
-      if (error) {
+      if (error != nullptr) {
         error->clear();
       }
       return true;
@@ -203,7 +214,7 @@ bool RecognitionSessionManager::SynchronizeBackend(const CoreConfig& settings, s
 
     pending_settings_ = settings;
     const AsrProvider* provider = ResolveActiveAsrProvider(settings);
-    target_provider_id_ = provider ? AsrProviderId(*provider) : std::string{};
+    target_provider_id_ = provider != nullptr ? AsrProviderId(*provider) : std::string{};
     target_model_id_ = ResolvePreferredLocalModel(settings);
     target_backend_signature_ = signature;
     reload_requested_ = true;
@@ -214,7 +225,7 @@ bool RecognitionSessionManager::SynchronizeBackend(const CoreConfig& settings, s
   }
 
   reload_cv_.notify_one();
-  if (error) {
+  if (error != nullptr) {
     error->clear();
   }
   return true;
@@ -230,7 +241,7 @@ RecognitionSessionManager::CreateSession(const CoreConfig& settings, BackendDesc
     return nullptr;
   }
 
-  if (error) {
+  if (error != nullptr) {
     error->clear();
   }
   return session;
@@ -240,12 +251,12 @@ RecognitionRunResult
 RecognitionSessionManager::ConsumeEvents(std::unique_ptr<RecognitionSession>* session, bool cancel,
                                          std::string* error) {
   RecognitionRunResult result;
-  if (!session || !*session) {
-    if (error) {
+  if (session == nullptr || *session == nullptr) {
+    if (error != nullptr) {
       *error = "Recognition session is not initialized.";
     }
     result.ok = false;
-    result.error = error ? *error : "Recognition session is not initialized.";
+    result.error = error != nullptr ? *error : "Recognition session is not initialized.";
     return result;
   }
 
@@ -275,14 +286,14 @@ RecognitionSessionManager::ConsumeEvents(std::unique_ptr<RecognitionSession>* se
   }
 
   session->reset();
-  if (error) {
+  if (error != nullptr) {
     *error = result.error;
   }
   return result;
 }
 
 RecognitionSessionManager::ReloadSnapshot RecognitionSessionManager::GetReloadSnapshot() const {
-  std::lock_guard<std::mutex> lock(state_mutex_);
+  const std::scoped_lock lock(state_mutex_);
   return ReloadSnapshot{
       .target_provider_id = target_provider_id_,
       .target_model_id = target_model_id_,
@@ -298,13 +309,13 @@ RecognitionSessionManager::ReloadSnapshot RecognitionSessionManager::GetReloadSn
 
 void RecognitionSessionManager::SetReloadResultCallback(
     std::function<void(bool success, const std::string& message)> callback) {
-  std::lock_guard<std::mutex> lock(state_mutex_);
+  const std::scoped_lock lock(state_mutex_);
   reload_result_callback_ = std::move(callback);
 }
 
 void RecognitionSessionManager::Shutdown() {
   {
-    std::lock_guard<std::mutex> lock(state_mutex_);
+    const std::scoped_lock lock(state_mutex_);
     reload_worker_running_ = false;
     reload_requested_ = false;
   }
@@ -313,7 +324,7 @@ void RecognitionSessionManager::Shutdown() {
     reload_worker_.join();
   }
 
-  std::lock_guard<std::mutex> lock(state_mutex_);
+  const std::scoped_lock lock(state_mutex_);
   ResetEffectiveBackendLocked();
   target_provider_id_.clear();
   target_model_id_.clear();
@@ -324,8 +335,8 @@ void RecognitionSessionManager::Shutdown() {
 bool RecognitionSessionManager::CreatePreparedBackend(const CoreConfig& settings,
                                                       PreparedBackend* prepared,
                                                       std::string* error) {
-  if (!prepared) {
-    if (error) {
+  if (prepared == nullptr) {
+    if (error != nullptr) {
       *error = "Prepared backend output is not available.";
     }
     return false;
@@ -336,7 +347,7 @@ bool RecognitionSessionManager::CreatePreparedBackend(const CoreConfig& settings
   std::string create_error;
   auto backend = std::shared_ptr<AsrBackend>(CreateBackend(settings, &create_error).release());
   if (!backend) {
-    if (error) {
+    if (error != nullptr) {
       *error = std::move(create_error);
     }
     return false;
@@ -352,7 +363,7 @@ bool RecognitionSessionManager::CreatePreparedBackend(const CoreConfig& settings
   std::string warmup_error;
   auto warmup_session = backend->CreateSession(&warmup_error);
   if (!warmup_session) {
-    if (error) {
+    if (error != nullptr) {
       *error = std::move(warmup_error);
     }
     return false;
@@ -366,7 +377,7 @@ bool RecognitionSessionManager::CreatePreparedBackend(const CoreConfig& settings
   prepared->provider_id = descriptor.provider_id;
   prepared->model_id = ResolvePreferredLocalModel(settings);
   prepared->signature = BuildRuntimeSignature(settings);
-  if (error) {
+  if (error != nullptr) {
     error->clear();
   }
   return true;
@@ -375,14 +386,14 @@ bool RecognitionSessionManager::CreatePreparedBackend(const CoreConfig& settings
 bool RecognitionSessionManager::ActivatePreparedBackend(PreparedBackend prepared,
                                                         std::string* error) {
   if (!prepared.backend) {
-    if (error) {
+    if (error != nullptr) {
       *error = "Prepared backend is empty.";
     }
     return false;
   }
 
   {
-    std::lock_guard<std::mutex> lock(state_mutex_);
+    const std::scoped_lock lock(state_mutex_);
     effective_backend_ = std::move(prepared.backend);
     effective_descriptor_ = std::move(prepared.descriptor);
     has_effective_descriptor_ = true;
@@ -395,7 +406,7 @@ bool RecognitionSessionManager::ActivatePreparedBackend(PreparedBackend prepared
     last_reload_error_.clear();
   }
 
-  if (error) {
+  if (error != nullptr) {
     error->clear();
   }
   return true;
@@ -415,8 +426,8 @@ bool RecognitionSessionManager::CreatePreparedBackendForReload(const CoreConfig&
 bool RecognitionSessionManager::CreateSessionFromEffectiveBackend(
     BackendDescriptor* descriptor, std::unique_ptr<RecognitionSession>* session,
     std::string* error) {
-  if (!session) {
-    if (error) {
+  if (session == nullptr) {
+    if (error != nullptr) {
       *error = "Recognition session output is not available.";
     }
     return false;
@@ -426,9 +437,9 @@ bool RecognitionSessionManager::CreateSessionFromEffectiveBackend(
   BackendDescriptor local_descriptor;
   bool have_descriptor = false;
   {
-    std::lock_guard<std::mutex> lock(state_mutex_);
+    const std::scoped_lock lock(state_mutex_);
     if (!effective_backend_) {
-      if (error) {
+      if (error != nullptr) {
         if (!last_reload_error_.empty()) {
           *error = last_reload_error_;
         } else if (reload_in_progress_) {
@@ -440,20 +451,20 @@ bool RecognitionSessionManager::CreateSessionFromEffectiveBackend(
       return false;
     }
 
-    if (descriptor && has_effective_descriptor_) {
+    if (descriptor != nullptr && has_effective_descriptor_) {
       local_descriptor = effective_descriptor_;
       have_descriptor = true;
     }
     backend = effective_backend_;
     if (!backend) {
-      if (error) {
+      if (error != nullptr) {
         *error = "ASR backend is not ready.";
       }
       return false;
     }
   }
 
-  if (descriptor && have_descriptor) {
+  if (descriptor != nullptr && have_descriptor) {
     *descriptor = std::move(local_descriptor);
   }
 
@@ -467,7 +478,7 @@ bool RecognitionSessionManager::CreateSessionFromEffectiveBackend(
 }
 
 void RecognitionSessionManager::EnsureReloadWorkerStarted() {
-  std::lock_guard<std::mutex> lock(state_mutex_);
+  const std::scoped_lock lock(state_mutex_);
   if (reload_worker_running_) {
     return;
   }
@@ -501,7 +512,7 @@ void RecognitionSessionManager::ReloadWorkerMain() {
 
     if (ok) {
       {
-        std::lock_guard<std::mutex> lock(state_mutex_);
+        const std::scoped_lock lock(state_mutex_);
         effective_backend_ = std::move(prepared.backend);
         effective_descriptor_ = std::move(prepared.descriptor);
         has_effective_descriptor_ = true;
@@ -517,7 +528,7 @@ void RecognitionSessionManager::ReloadWorkerMain() {
     }
 
     {
-      std::lock_guard<std::mutex> lock(state_mutex_);
+      const std::scoped_lock lock(state_mutex_);
       last_reload_error_ = error;
       reload_in_progress_ = false;
     }
@@ -550,7 +561,7 @@ void RecognitionSessionManager::ApplyDisabledStateLocked() {
 void RecognitionSessionManager::NotifyReloadResult(bool success, const std::string& message) {
   std::function<void(bool, const std::string&)> callback;
   {
-    std::lock_guard<std::mutex> lock(state_mutex_);
+    const std::scoped_lock lock(state_mutex_);
     callback = reload_result_callback_;
   }
   if (callback) {

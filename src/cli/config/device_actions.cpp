@@ -1,18 +1,23 @@
 #include "cli/config/device_actions.h"
 
-#include <nlohmann/json.hpp>
+#include <glaze/json/json_t.hpp>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "common/audio/pipewire_device.h"
 #include "common/config/core_config.h"
+#include "common/config/core_config_types.h"
 #include "common/i18n.h"
 #include "common/utils/string_utils.h"
 
+#include "cli/utils/cli_context.h"
 #include "cli/utils/cli_helpers.h"
+#include "cli/utils/formatter.h"
 
 int RunDeviceConfigList(Formatter& fmt, const CliContext& ctx) {
-  CoreConfig config = LoadCoreConfig();
-  std::string active_device = config.global.captureDevice;
+  const CoreConfig config = LoadCoreConfig();
+  const std::string active_device = config.global.captureDevice;
 
   auto devices = vinput::pw::EnumerateAudioSources();
   if (devices.empty()) {
@@ -21,29 +26,32 @@ int RunDeviceConfigList(Formatter& fmt, const CliContext& ctx) {
   }
 
   if (ctx.json_output) {
-    nlohmann::json arr = nlohmann::json::array();
+    glz::json_t::array_t arr;
+    arr.reserve(devices.size());
     for (const auto& d : devices) {
-      bool is_active =
+      const bool is_active =
           (d.name == active_device) || (active_device == "default" && d.name == "default");
-      arr.push_back(
-          {{"id", d.id}, {"name", d.name}, {"description", d.description}, {"active", is_active}});
+      glz::json_t json_entry = {
+          {"id", d.id}, {"name", d.name}, {"description", d.description}, {"active", is_active}};
+      arr.emplace_back(std::move(json_entry));
     }
-    fmt.PrintJson(arr);
+    fmt.PrintJson(glz::json_t(std::move(arr)));
     return 0;
   }
 
-  std::vector<std::string> headers = {_("NAME"), _("DESCRIPTION"), _("STATUS")};
+  const std::vector<std::string> headers = {_("NAME"), _("DESCRIPTION"), _("STATUS")};
   std::vector<std::vector<std::string>> rows;
 
   {
-    std::string status = (active_device == "default" || active_device.empty())
-                             ? std::string("[*] ") + _("Active")
-                             : "[ ]";
+    const std::string status = (active_device == "default" || active_device.empty())
+                                   ? std::string("[*] ") + _("Active")
+                                   : "[ ]";
     rows.push_back({"default", _("System Default"), status});
   }
 
   for (const auto& d : devices) {
-    std::string status = (active_device == d.name) ? std::string("[*] ") + _("Active") : "[ ]";
+    const std::string status =
+        (active_device == d.name) ? std::string("[*] ") + _("Active") : "[ ]";
     rows.push_back({d.name, d.description, status});
   }
 
@@ -73,8 +81,9 @@ int RunDeviceConfigUse(const std::string& name, Formatter& fmt, const CliContext
 
   config.global.captureDevice = target_to_save;
 
-  if (!SaveConfigOrFail(config, fmt))
+  if (!SaveConfigOrFail(config, fmt)) {
     return 1;
+  }
 
   fmt.PrintSuccess(vinput::str::FmtStr(
       _("Capture device set to '%s'. Restart daemon to apply changes."), target_to_save));

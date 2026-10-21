@@ -2,19 +2,20 @@
 
 #include <algorithm>
 #include <asm-generic/socket.h>
+#include <atomic>
 #include <charconv>
 #include <chrono>
-#include <cstdint>
 #include <cstdio>
+#include <exception>
+#include <glaze/json/json_t.hpp>
+#include <glaze/json/read.hpp>
 #include <httplib.h>
 #include <ifaddrs.h>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <net/if.h>
 #include <netdb.h>
 #include <netinet/in.h>
-#include <nlohmann/json.hpp>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -22,9 +23,12 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "common/config/core_config.h"
+#include "common/config/core_config_types.h"
+#include "common/json/json_access.h"
 #include "common/utils/interpolation.h"
 #include "common/utils/string_utils.h"
 
@@ -33,8 +37,6 @@
 namespace vinput::daemon::remote {
 
 namespace {
-
-using json = nlohmann::json;
 
 constexpr std::string_view kRemoteProviderId = "provider.vinput.remote.streaming";
 
@@ -136,25 +138,25 @@ RemoteTextService::~RemoteTextService() {
 }
 
 int RemoteTextService::Port() const {
-  const std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+  const std::scoped_lock lock(lifecycle_mutex_);
   return bound_port_ > 0 ? bound_port_ : settings_.port;
 }
 
 bool RemoteTextService::ExtractSettings(const CoreConfig& config, Settings* settings,
-                                        bool* should_run, std::string* error) const {
-  if (!settings) {
+                                        bool* should_run, std::string* error) {
+  if (settings == nullptr) {
     if (error != nullptr) {
       *error = "settings output is null";
     }
     return false;
   }
-  if (should_run) {
+  if (should_run != nullptr) {
     *should_run = false;
   }
 
   const AsrProvider* provider = ResolveActiveAsrProvider(config);
-  const auto* command = provider ? std::get_if<CommandAsrProvider>(provider) : nullptr;
-  if (!command) {
+  const auto* command = provider != nullptr ? std::get_if<CommandAsrProvider>(provider) : nullptr;
+  if (command == nullptr) {
     if (error != nullptr) {
       error->clear();
     }
@@ -205,7 +207,7 @@ bool RemoteTextService::ExtractSettings(const CoreConfig& config, Settings* sett
   }
 
   *settings = std::move(out);
-  if (should_run) {
+  if (should_run != nullptr) {
     *should_run = true;
   }
   if (error != nullptr) {
@@ -222,7 +224,7 @@ bool RemoteTextService::Synchronize(const CoreConfig& config, std::string* error
     return false;
   }
 
-  const std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+  const std::scoped_lock lifecycle_lock(lifecycle_mutex_);
   if (!should_run) {
     if (service_started_) {
       Shutdown();
@@ -250,7 +252,7 @@ bool RemoteTextService::Synchronize(const CoreConfig& config, std::string* error
 }
 
 void RemoteTextService::SetSessionControlCallbacks(StartCallback on_start, StopCallback on_stop) {
-  const std::lock_guard<std::mutex> lock(callback_mutex_);
+  const std::scoped_lock lock(callback_mutex_);
   on_start_ = std::move(on_start);
   on_stop_ = std::move(on_stop);
 }
@@ -258,7 +260,7 @@ void RemoteTextService::SetSessionControlCallbacks(StartCallback on_start, StopC
 void RemoteTextService::MaybeTriggerStart() {
   StartCallback cb;
   {
-    const std::lock_guard<std::mutex> lock(callback_mutex_);
+    const std::scoped_lock lock(callback_mutex_);
     cb = on_start_;
   }
   if (!cb) {
@@ -266,7 +268,7 @@ void RemoteTextService::MaybeTriggerStart() {
   }
   bool needs_start = false;
   {
-    const std::lock_guard<std::mutex> lock(state_mutex_);
+    const std::scoped_lock lock(state_mutex_);
     if (output_ws_ == nullptr || !output_ws_->is_open()) {
       needs_start = true;
     }
@@ -280,7 +282,7 @@ void RemoteTextService::MaybeTriggerStart() {
 }
 
 std::vector<std::string> RemoteTextService::ListEndpoints() const {
-  const std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+  const std::scoped_lock lock(lifecycle_mutex_);
   if (!service_started_) {
     return {};
   }
@@ -291,7 +293,7 @@ std::vector<std::string> RemoteTextService::ListEndpoints() const {
   }
 
   std::vector<std::string> endpoints;
-  for (ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+  for (const ifaddrs* ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
     if (ifa->ifa_addr == nullptr || ifa->ifa_addr->sa_family != AF_INET) {
       continue;
     }
@@ -308,8 +310,8 @@ std::vector<std::string> RemoteTextService::ListEndpoints() const {
   }
   freeifaddrs(ifaddr);
 
-  std::sort(endpoints.begin(), endpoints.end());
-  endpoints.erase(std::unique(endpoints.begin(), endpoints.end()), endpoints.end());
+  std::ranges::sort(endpoints);
+  endpoints.erase(std::ranges::unique(endpoints).begin(), endpoints.end());
   return endpoints;
 }
 
@@ -425,7 +427,7 @@ void RemoteTextService::Shutdown() {
   const bool was_running = running_.exchange(false, std::memory_order_acq_rel);
   start_in_progress_.store(false, std::memory_order_release);
   {
-    const std::lock_guard<std::mutex> lock(debounce_mutex_);
+    const std::scoped_lock lock(debounce_mutex_);
     debounce_stop_ = true;
     debounce_pending_ = false;
   }
@@ -436,7 +438,7 @@ void RemoteTextService::Shutdown() {
   }
 
   {
-    const std::lock_guard<std::mutex> lock(state_mutex_);
+    const std::scoped_lock lock(state_mutex_);
     if (output_ws_ != nullptr && output_ws_->is_open()) {
       output_ws_->close(httplib::ws::CloseStatus::Normal, "Service shutting down");
     }
@@ -454,7 +456,7 @@ void RemoteTextService::Shutdown() {
   http_server_.reset();
 
   {
-    const std::lock_guard<std::mutex> lock(state_mutex_);
+    const std::scoped_lock lock(state_mutex_);
     output_ws_ = nullptr;
     input_ws_ = nullptr;
   }
@@ -468,12 +470,13 @@ void RemoteTextService::Shutdown() {
 
 void RemoteTextService::HandleOutputSession(httplib::ws::WebSocket& ws) {
   {
-    const std::lock_guard<std::mutex> lock(state_mutex_);
+    const std::scoped_lock lock(state_mutex_);
     if (output_ws_ != nullptr && output_ws_->is_open()) {
-      ws.send(json{{"event_id", NewEventId("event")},
-                   {"type", "error"},
-                   {"error", json{{"message", "Output client already connected."}}}}
-                  .dump());
+      ws.send(vinput::json::ToText(
+          glz::json_t{{"event_id", NewEventId("event")},
+                      {"type", "error"},
+                      {"error", glz::json_t{{"message", "Output client already "
+                                                        "connected."}}}}));
       ws.close(httplib::ws::CloseStatus::PolicyViolation, "Output client already connected.");
       return;
     }
@@ -492,23 +495,20 @@ void RemoteTextService::HandleOutputSession(httplib::ws::WebSocket& ws) {
       continue;
     }
 
-    json event;
-    try {
-      event = json::parse(payload);
-    } catch (const std::exception&) {
+    glz::json_t event;
+    if (bool(glz::read_json(event, payload))) {
       continue;
     }
 
-    const std::string type = event.value("type", std::string{});
+    const std::string type = vinput::json::String(event, "type");
     if (type == "session.update") {
-      json session_data = json::object();
-      if (event.contains("session")) {
-        session_data = event["session"];
+      glz::json_t session_data = glz::json_t(glz::json_t::object_t{});
+      if (const auto* session = vinput::json::Find(event, "session")) {
+        session_data = *session;
       }
-      ws.send(json{{"event_id", NewEventId("event")},
-                   {"type", "session.updated"},
-                   {"session", std::move(session_data)}}
-                  .dump());
+      ws.send(vinput::json::ToText(glz::json_t{{"event_id", NewEventId("event")},
+                                               {"type", "session.updated"},
+                                               {"session", std::move(session_data)}}));
     } else if (type == "input_audio_buffer.append") {
       // Audio frames are ignored as input comes via /ws
     } else if (type == "input_audio_buffer.commit") {
@@ -523,7 +523,7 @@ void RemoteTextService::HandleOutputSession(httplib::ws::WebSocket& ws) {
 
   bool was_active = false;
   {
-    const std::lock_guard<std::mutex> lock(state_mutex_);
+    const std::scoped_lock lock(state_mutex_);
     if (output_ws_ == &ws) {
       output_ws_ = nullptr;
       was_active = true;
@@ -549,12 +549,10 @@ void RemoteTextService::HandleInputSession(httplib::ws::WebSocket& ws) {
       continue;
     }
 
-    json event;
-    try {
-      event = json::parse(payload);
-    } catch (const std::exception&) {
+    glz::json_t event;
+    if (bool(glz::read_json(event, payload))) {
       if (!authenticated) {
-        ws.send(json{{"type", "error"}, {"message", "Invalid JSON."}}.dump());
+        ws.send(vinput::json::ToText(glz::json_t{{"type", "error"}, {"message", "Invalid JSON."}}));
         ws.close(httplib::ws::CloseStatus::PolicyViolation, "Invalid JSON.");
         return;
       }
@@ -562,17 +560,17 @@ void RemoteTextService::HandleInputSession(httplib::ws::WebSocket& ws) {
     }
 
     if (!authenticated) {
-      const std::string type = event.value("type", std::string{});
-      const std::string api_key = event.value("api_key", std::string{});
+      const std::string type = vinput::json::String(event, "type");
+      const std::string api_key = vinput::json::String(event, "api_key");
       if (type != "auth" || !ValidateApiKey(api_key)) {
-        ws.send(json{{"type", "error"}, {"message", "Unauthorized."}}.dump());
+        ws.send(vinput::json::ToText(glz::json_t{{"type", "error"}, {"message", "Unauthorized."}}));
         ws.close(httplib::ws::CloseStatus::PolicyViolation, "Unauthorized.");
         return;
       }
 
       httplib::ws::WebSocket* old_ws = nullptr;
       {
-        const std::lock_guard<std::mutex> lock(state_mutex_);
+        const std::scoped_lock lock(state_mutex_);
         if (input_ws_ != nullptr && input_ws_ != &ws) {
           old_ws = input_ws_;
         }
@@ -585,7 +583,7 @@ void RemoteTextService::HandleInputSession(httplib::ws::WebSocket& ws) {
         if (start_in_progress_.load()) {
           StopCallback stop_cb;
           {
-            const std::lock_guard<std::mutex> lock(callback_mutex_);
+            const std::scoped_lock lock(callback_mutex_);
             stop_cb = on_stop_;
           }
           if (stop_cb) {
@@ -594,37 +592,37 @@ void RemoteTextService::HandleInputSession(httplib::ws::WebSocket& ws) {
           start_in_progress_.store(false);
         }
         if (old_ws->is_open()) {
-          old_ws->send(
-              json{{"type", "displaced"}, {"message", "Replaced by new authenticated session."}}
-                  .dump());
+          old_ws->send(vinput::json::ToText(glz::json_t{
+              {"type", "displaced"}, {"message", "Replaced by new authenticated session."}}));
           old_ws->close(httplib::ws::CloseStatus::Normal, "Replaced by new authenticated session.");
         }
       }
 
-      ws.send(json{{"type", "auth_ok"}}.dump());
+      ws.send(vinput::json::ToText(glz::json_t{{"type", "auth_ok"}}));
       authenticated = true;
 
       std::string output_status = "disconnected";
       {
-        const std::lock_guard<std::mutex> lock(state_mutex_);
+        const std::scoped_lock lock(state_mutex_);
         if (output_ws_ != nullptr && output_ws_->is_open()) {
           output_status = "connected";
         }
       }
-      ws.send(json{{"type", "init"}, {"output_status", output_status}}.dump());
+      ws.send(
+          vinput::json::ToText(glz::json_t{{"type", "init"}, {"output_status", output_status}}));
       continue;
     }
 
     {
-      const std::lock_guard<std::mutex> lock(state_mutex_);
+      const std::scoped_lock lock(state_mutex_);
       if (input_ws_ != &ws) {
         return;
       }
     }
 
-    const std::string type = event.value("type", std::string{});
+    const std::string type = vinput::json::String(event, "type");
     if (type == "text_update") {
-      const std::string text = event.value("text", std::string{});
+      const std::string text = vinput::json::String(event, "text");
       SetText(text);
       if (!text.empty()) {
         MaybeTriggerStart();
@@ -637,7 +635,7 @@ void RemoteTextService::HandleInputSession(httplib::ws::WebSocket& ws) {
 
   bool was_active = false;
   {
-    const std::lock_guard<std::mutex> lock(state_mutex_);
+    const std::scoped_lock lock(state_mutex_);
     if (input_ws_ == &ws) {
       input_ws_ = nullptr;
       was_active = true;
@@ -661,30 +659,30 @@ bool RemoteTextService::ValidateApiKey(std::string_view api_key) const {
 }
 
 void RemoteTextService::NotifyInput(std::string_view type) {
-  const std::lock_guard<std::mutex> lock(state_mutex_);
+  const std::scoped_lock lock(state_mutex_);
   if (input_ws_ != nullptr && input_ws_->is_open()) {
-    input_ws_->send(json{{"type", type}}.dump());
+    input_ws_->send(vinput::json::ToText(glz::json_t{{"type", std::string(type)}}));
   }
 }
 
 void RemoteTextService::SetText(std::string text) {
-  const std::lock_guard<std::mutex> lock(text_mutex_);
+  const std::scoped_lock lock(text_mutex_);
   current_text_ = std::move(text);
 }
 
 std::string RemoteTextService::GetText() const {
-  const std::lock_guard<std::mutex> lock(text_mutex_);
+  const std::scoped_lock lock(text_mutex_);
   return current_text_;
 }
 
 void RemoteTextService::ClearText() {
-  const std::lock_guard<std::mutex> lock(text_mutex_);
+  const std::scoped_lock lock(text_mutex_);
   current_text_.clear();
 }
 
 void RemoteTextService::ScheduleDebounce() {
   {
-    const std::lock_guard<std::mutex> lock(debounce_mutex_);
+    const std::scoped_lock lock(debounce_mutex_);
     debounce_pending_ = true;
     debounce_deadline_ =
         std::chrono::steady_clock::now() + std::chrono::milliseconds(settings_.debounce_ms);
@@ -694,7 +692,7 @@ void RemoteTextService::ScheduleDebounce() {
 
 void RemoteTextService::CancelDebounce() {
   {
-    const std::lock_guard<std::mutex> lock(debounce_mutex_);
+    const std::scoped_lock lock(debounce_mutex_);
     debounce_pending_ = false;
   }
   debounce_cv_.notify_all();
@@ -726,10 +724,9 @@ void RemoteTextService::DebounceLoop() {
 
 void RemoteTextService::SendEmptyCommit(httplib::ws::WebSocket& ws) {
   if (ws.is_open()) {
-    ws.send(json{{"event_id", NewEventId("event")},
-                 {"type", "input_audio_buffer.committed"},
-                 {"item_id", NewEventId("item")}}
-                .dump());
+    ws.send(vinput::json::ToText(glz::json_t{{"event_id", NewEventId("event")},
+                                             {"type", "input_audio_buffer.committed"},
+                                             {"item_id", NewEventId("item")}}));
   }
 }
 
@@ -741,7 +738,7 @@ void RemoteTextService::SendFinalResult() {
     NotifyInput("committed");
     StopCallback stop_cb;
     {
-      const std::lock_guard<std::mutex> lock(callback_mutex_);
+      const std::scoped_lock lock(callback_mutex_);
       stop_cb = on_stop_;
     }
     if (stop_cb) {
@@ -751,25 +748,22 @@ void RemoteTextService::SendFinalResult() {
   }
 
   {
-    const std::lock_guard<std::mutex> lock(state_mutex_);
+    const std::scoped_lock lock(state_mutex_);
     if (output_ws_ != nullptr && output_ws_->is_open()) {
       const std::string item_id = NewEventId("item");
-      output_ws_->send(json{
-          {"event_id", NewEventId("event")},
-          {"type", "input_audio_buffer.committed"},
-          {"item_id",
-           item_id}}.dump());
-      output_ws_->send(json{
-          {"event_id", NewEventId("event")},
-          {"type", "conversation.item.input_audio_transcription.delta"},
-          {"item_id", item_id},
-          {"delta", text}}.dump());
-      output_ws_->send(json{
-          {"event_id", NewEventId("event")},
-          {"type", "conversation.item.input_audio_transcription.completed"},
-          {"item_id", item_id},
-          {"transcript",
-           text}}.dump());
+      output_ws_->send(vinput::json::ToText(glz::json_t{{"event_id", NewEventId("event")},
+                                                        {"type", "input_audio_buffer.committed"},
+                                                        {"item_id", item_id}}));
+      output_ws_->send(vinput::json::ToText(
+          glz::json_t{{"event_id", NewEventId("event")},
+                      {"type", "conversation.item.input_audio_transcription.delta"},
+                      {"item_id", item_id},
+                      {"delta", text}}));
+      output_ws_->send(vinput::json::ToText(
+          glz::json_t{{"event_id", NewEventId("event")},
+                      {"type", "conversation.item.input_audio_transcription.completed"},
+                      {"item_id", item_id},
+                      {"transcript", text}}));
     }
   }
 
@@ -778,7 +772,7 @@ void RemoteTextService::SendFinalResult() {
 
   StopCallback stop_cb;
   {
-    const std::lock_guard<std::mutex> lock(callback_mutex_);
+    const std::scoped_lock lock(callback_mutex_);
     stop_cb = on_stop_;
   }
   if (stop_cb) {

@@ -1,8 +1,9 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
+#include <glaze/json/json_t.hpp>
 #include <map>
-#include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -23,28 +24,31 @@ struct ModelInfo {
   std::map<std::string, std::string> rejected_files;
   // Flattened scalar parameters for compatibility with old callers.
   std::map<std::string, std::string> params;
-  nlohmann::json recognizer_config;
-  nlohmann::json model_config;
+  // Engine specific knobs discovered at runtime from vinput-model.json.
+  glz::json_t recognizer_config = glz::json_t(glz::json_t::object_t{});
+  glz::json_t model_config = glz::json_t(glz::json_t::object_t{});
 
   // Convenience accessors
-  std::string File(const std::string& key) const {
+  [[nodiscard]] std::string File(const std::string& key) const {
     auto it = files.find(key);
     return it != files.end() ? it->second : std::string{};
   }
-  std::string Param(const std::string& key, const std::string& default_val = "") const {
+  [[nodiscard]] std::string Param(const std::string& key,
+                                  const std::string& default_val = "") const {
     auto it = params.find(key);
     return it != params.end() ? it->second : default_val;
   }
-  bool ParamBool(const std::string& key, bool default_val = false) const {
+  [[nodiscard]] bool ParamBool(const std::string& key, bool default_val = false) const {
     auto it = params.find(key);
-    if (it == params.end())
+    if (it == params.end()) {
       return default_val;
+    }
     return it->second == "true" || it->second == "1";
   }
-  std::string RuntimeLanguageHint() const;
+  [[nodiscard]] std::string RuntimeLanguageHint() const;
 };
 
-enum class ModelState { Installed, Active, Broken };
+enum class ModelState : std::uint8_t { Installed, Active, Broken };
 
 struct ModelSummary {
   std::string id;
@@ -57,16 +61,16 @@ struct ModelSummary {
 
 class ModelManager {
 public:
-  explicit ModelManager(const std::string& base_dir = "", const std::string& model_id = "");
+  explicit ModelManager(const std::string& base_dir = "", std::string model_id = "");
 
   bool EnsureModels(std::string* error = nullptr);
   ModelInfo GetModelInfo(std::string* error = nullptr) const;
-  std::vector<std::string> ListModels() const;
-  std::string GetBaseDir() const;
-  std::string GetModelId() const;
+  [[nodiscard]] std::vector<std::string> ListModels() const;
+  [[nodiscard]] std::string GetBaseDir() const;
+  [[nodiscard]] std::string GetModelId() const;
 
   // List all local models with their states
-  std::vector<ModelSummary> ListDetailed(const std::string& active_model) const;
+  [[nodiscard]] std::vector<ModelSummary> ListDetailed(const std::string& active_model) const;
   // Validate model directory integrity
   bool Validate(const std::string& model_id, std::string* error) const;
   // Remove a model directory
@@ -75,7 +79,7 @@ public:
   static std::filesystem::path NormalizeBaseDir(const std::string& raw_path);
   static std::filesystem::path RelativePathForId(std::string_view model_id);
   static std::string IdFromRelativePath(const std::filesystem::path& relative_path);
-  std::filesystem::path ModelDir(std::string_view model_id) const;
+  [[nodiscard]] std::filesystem::path ModelDir(std::string_view model_id) const;
 
 private:
   std::string base_dir_;

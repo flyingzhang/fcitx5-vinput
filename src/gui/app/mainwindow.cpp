@@ -16,7 +16,8 @@
 #include <QtWidgets/qmessagebox.h>
 #include <atomic>
 #include <fstream>
-#include <nlohmann/json.hpp>
+#include <glaze/json/json_t.hpp>
+#include <glaze/json/read.hpp>
 
 #include "common/utils/downloader.h"
 #include "common/utils/file_utils.h"
@@ -34,28 +35,46 @@
 #if VINPUT_ENABLE_LOCAL_ASR
 #include "pages/hotwords/hotword_page.h"
 #endif
+#include <QtCore/qnamespace.h>
+#include <QtCore/qobject.h>
+#include <QtCore/qobjectdefs.h>
+#include <QtCore/qstring.h>
+#include <QtCore/qthread.h>
+#include <QtCore/qurl.h>
+#include <QtGui/qdesktopservices.h>
+#include <QtWidgets/qboxlayout.h>
+#include <QtWidgets/qmainwindow.h>
+#include <QtWidgets/qpushbutton.h>
+#include <QtWidgets/qtabwidget.h>
+#include <QtWidgets/qwidget.h>
+#include <variant>
+#include <vector>
+
+#include "common/config/core_config_types.h"
+#include "common/json/json_access.h"
+
 #include "pages/llm/llm_page.h"
 #include "pages/resources/resource_page.h"
 
-MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
+MainWindow::MainWindow(QWidget* parent)
+    : QMainWindow(parent), tabWidget_(new QTabWidget(this)),
+      controlPage_(new vinput::gui::ControlPage(this)),
+      resourcePage_(new vinput::gui::ResourcePage(this)), llmPage_(new vinput::gui::LlmPage(this))
+#if VINPUT_ENABLE_LOCAL_ASR
+      ,
+      hotwordPage_(new vinput::gui::HotwordPage(this))
+#endif
+{
   setWindowTitle(tr("Vinput Configuration"));
 
   auto* centralWidget = new QWidget(this);
   setCentralWidget(centralWidget);
   auto* mainLayout = new QVBoxLayout(centralWidget);
 
-  tabWidget_ = new QTabWidget(this);
   mainLayout->addWidget(tabWidget_);
 
   // Sync disk-only i18n preload before pages paint titles; no network here.
   vinput::gui::I18nCache::Get().LoadFromDiskSync();
-
-  controlPage_ = new vinput::gui::ControlPage(this);
-  resourcePage_ = new vinput::gui::ResourcePage(this);
-  llmPage_ = new vinput::gui::LlmPage(this);
-#if VINPUT_ENABLE_LOCAL_ASR
-  hotwordPage_ = new vinput::gui::HotwordPage(this);
-#endif
 
   tabWidget_->addTab(controlPage_, tr("Control"));
   tabWidget_->addTab(resourcePage_, tr("Resources"));
@@ -99,7 +118,7 @@ void MainWindow::onSaveClicked() {
   CoreConfig config = vinput::gui::ConfigManager::Get().Load();
 
   // Save device
-  QString device = controlPage_->currentDevice();
+  const QString device = controlPage_->currentDevice();
   if (!device.isEmpty() && device != "default") {
     config.global.captureDevice = device.toStdString();
   } else {
@@ -117,7 +136,7 @@ void MainWindow::onSaveClicked() {
 
 #if VINPUT_ENABLE_LOCAL_ASR
   // Save hotwords
-  QString hotwordsFile = hotwordPage_->hotwordsFilePath();
+  const QString hotwordsFile = hotwordPage_->hotwordsFilePath();
   for (auto& prov : config.asr.providers) {
     if (auto* local = std::get_if<LocalAsrProvider>(&prov)) {
       if (!hotwordsFile.isEmpty()) {
@@ -160,27 +179,43 @@ void MainWindow::onOpenConfigClicked() {
 }
 
 namespace {
-QString localizedString(const nlohmann::json& obj) {
-  if (obj.is_string()) {
-    return QString::fromStdString(obj.get<std::string>());
+QString localizedString(const glz::json_t* node) {
+  if (node == nullptr) {
+    return {};
   }
-  if (!obj.is_object()) {
+  if (const auto* text = node->get_if<std::string>()) {
+    return QString::fromStdString(*text);
+  }
+  if (!node->is_object()) {
     return {};
   }
   const std::string locale =
       vinput::locale::NormalizeLocale(QLocale::system().name().toStdString());
-  if (obj.contains(locale)) {
-    return QString::fromStdString(obj[locale].get<std::string>());
+  if (const auto* entry = vinput::json::Find(*node, locale); entry != nullptr) {
+    if (const auto* text = entry->get_if<std::string>()) {
+      return QString::fromStdString(*text);
+    }
   }
   const auto lang = std::string(vinput::locale::ExtractLanguageCode(locale));
-  if (lang != locale && obj.contains(lang)) {
-    return QString::fromStdString(obj[lang].get<std::string>());
+  if (lang != locale) {
+    if (const auto* entry = vinput::json::Find(*node, lang); entry != nullptr) {
+      if (const auto* text = entry->get_if<std::string>()) {
+        return QString::fromStdString(*text);
+      }
+    }
   }
-  if (obj.contains("en")) {
-    return QString::fromStdString(obj["en"].get<std::string>());
+  if (const auto* english = vinput::json::Find(*node, "en"); english != nullptr) {
+    if (const auto* text = english->get_if<std::string>()) {
+      return QString::fromStdString(*text);
+    }
   }
-  if (!obj.empty()) {
-    return QString::fromStdString(obj.begin().value().get<std::string>());
+  if (const auto* members = node->get_if<glz::json_t::object_t>()) {
+    for (const auto& [key, value] : *members) {
+      (void)key;
+      if (const auto* text = value.get_if<std::string>()) {
+        return QString::fromStdString(*text);
+      }
+    }
   }
   return {};
 }
@@ -205,14 +240,12 @@ void MainWindow::checkNotification() {
       return true;
     }
 
-    nlohmann::json j;
-    try {
-      j = nlohmann::json::parse(content);
-    } catch (...) {
+    glz::json_t j;
+    if (bool(glz::read_json(j, content))) {
       return true;
     }
 
-    const int remote_id = j.value("id", 0);
+    const int remote_id = vinput::json::Int(j, "id");
     if (remote_id <= 0) {
       return true;
     }
@@ -231,9 +264,9 @@ void MainWindow::checkNotification() {
       return true;
     }
 
-    const QString title = localizedString(j.value("title", nlohmann::json{}));
-    const QString text = localizedString(j.value("text", nlohmann::json{}));
-    const QString url = QString::fromStdString(j.value("url", std::string{}));
+    const QString title = localizedString(vinput::json::Find(j, "title"));
+    const QString text = localizedString(vinput::json::Find(j, "text"));
+    const QString url = QString::fromStdString(vinput::json::String(j, "url"));
     const QString id = QString::number(remote_id);
 
     if (cancel_token != nullptr && cancel_token->load(std::memory_order_relaxed)) {
@@ -259,7 +292,8 @@ void MainWindow::checkNotification() {
   worker->start();
 }
 
-void MainWindow::onNotificationReady(QString id, QString title, QString text, QString url) {
+void MainWindow::onNotificationReady(const QString& id, const QString& title, const QString& text,
+                                     const QString& url) {
   QMessageBox msgBox(this);
   msgBox.setWindowTitle(title);
   msgBox.setText(text);

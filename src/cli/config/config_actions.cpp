@@ -1,8 +1,10 @@
 #include "cli/config/config_actions.h"
 
 #include <cstdio>
+#include <glaze/json/json_t.hpp>
 #include <iostream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "common/config/config_migration.h"
@@ -10,10 +12,13 @@
 #include "common/i18n.h"
 #include "common/utils/string_utils.h"
 
+#include "cli/utils/cli_context.h"
 #include "cli/utils/editor_utils.h"
+#include "cli/utils/formatter.h"
 
 int RunConfigDomainGet(const std::string& path, Formatter& fmt, const CliContext& ctx) {
-  std::string value, error;
+  std::string value;
+  std::string error;
   if (!vinput::config::GetConfigValue(path, &value, &error)) {
     fmt.PrintError(error);
     return 1;
@@ -31,10 +36,12 @@ int RunConfigDomainSet(const std::string& path, const std::string& value_arg, bo
   (void)ctx;
   std::string value = value_arg;
   if (from_stdin) {
-    std::string line, all;
+    std::string line;
+    std::string all;
     while (std::getline(std::cin, line)) {
-      if (!all.empty())
+      if (!all.empty()) {
         all += '\n';
+      }
       all += line;
     }
     value = all;
@@ -67,7 +74,7 @@ int RunConfigMigrate(bool dry_run, Formatter& fmt, const CliContext& ctx) {
   }
 
   if (ctx.json_output) {
-    nlohmann::json j;
+    glz::json_t j = glz::json_t(glz::json_t::object_t{});
     j["needed"] = report.needed;
     j["applied"] = report.applied;
     j["dry_run"] = dry_run;
@@ -75,12 +82,15 @@ int RunConfigMigrate(bool dry_run, Formatter& fmt, const CliContext& ctx) {
     j["conf_file"] = report.conf_file.string();
     j["config_backup"] = report.config_backup.string();
     j["conf_backup"] = report.conf_backup.string();
-    nlohmann::json changes = nlohmann::json::array();
-    changes.get_ptr<nlohmann::json::array_t*>()->reserve(report.changes.size());
+    glz::json_t changes = glz::json_t(glz::json_t::array_t{});
+    changes.get_array().reserve(report.changes.size());
     for (const auto& ch : report.changes) {
-      changes.push_back({{"file", ch.file}, {"description", ch.description}});
+      glz::json_t entry;
+      entry["file"] = ch.file;
+      entry["description"] = ch.description;
+      changes.get_array().push_back(std::move(entry));
     }
-    j["changes"] = changes;
+    j["changes"] = std::move(changes);
     fmt.PrintJson(j);
     return 0;
   }

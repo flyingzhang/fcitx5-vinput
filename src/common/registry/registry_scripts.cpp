@@ -3,12 +3,21 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <filesystem>
-#include <nlohmann/json.hpp>
+#include <glaze/core/common.hpp>
+#include <glaze/json/json_t.hpp>
+#include <glaze/json/read.hpp>
+#include <map>
 #include <string>
+#include <string_view>
 #include <system_error>
+#include <utility>
+#include <variant>
+#include <vector>
 
 #include "common/config/core_config_types.h"
+#include "common/json/json_access.h"
 #include "common/registry/installed_manifest.h"
 #include "common/registry/registry_cache.h"
 #include "common/registry/registry_fetch.h"
@@ -22,7 +31,6 @@ namespace vinput::script {
 
 namespace {
 
-using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 std::vector<std::string> SplitResourceId(std::string_view id) {
@@ -82,67 +90,63 @@ bool TypeMatchesKind(std::string_view type, Kind kind) {
 }
 
 std::vector<RegistryEntry> ParseRegistryJson(const std::string& content, std::string* error) {
-  std::vector<RegistryEntry> entries;
-  try {
-    const json j = json::parse(content);
-    if (!j.is_object()) {
-      if (error) {
-        *error = "script registry JSON is not an object";
-      }
-      return {};
+  glz::json_t root;
+  if (const auto ec = glz::read_json(root, content); bool(ec)) {
+    if (error != nullptr) {
+      *error = "failed to parse script registry JSON: " + glz::format_error(ec, content);
     }
-    if (!j.contains("items") || !j.at("items").is_array()) {
-      if (error) {
-        *error = "script registry JSON is missing array field 'items'";
-      }
-      return {};
+    return {};
+  }
+  const auto* items = vinput::json::Find(root, "items");
+  if (items == nullptr) {
+    if (error != nullptr) {
+      *error = "script registry JSON is not an object or is missing array field 'items'";
     }
-
-    for (const auto& item : j.at("items")) {
-      RegistryEntry entry;
-      entry.id = item.value("id", "");
-      entry.short_id = item.value("short_id", "");
-      entry.version = item.value("version", "");
-      entry.sha256 = item.value("sha256", "");
-      entry.vinput_version = item.value("vinput_version", "");
-      entry.stream = item.value("stream", false);
-      entry.command = item.value("command", "");
-      entry.readme_url = item.value("readme_url", "");
-      if (item.contains("script_urls") && item.at("script_urls").is_array()) {
-        for (const auto& value : item.at("script_urls")) {
-          if (value.is_string()) {
-            const auto url = value.get<std::string>();
-            if (!url.empty()) {
-              entry.script_urls.push_back(url);
-            }
-          }
-        }
-      }
-      if (item.contains("envs") && item.at("envs").is_array()) {
-        for (const auto& value : item.at("envs")) {
-          if (!value.is_object()) {
-            continue;
-          }
-          EnvSpec env;
-          env.name = value.value("name", "");
-          env.required = value.value("required", false);
-          if (!env.name.empty()) {
-            entry.envs.push_back(std::move(env));
-          }
-        }
-      }
-      if (!entry.id.empty() && !entry.command.empty() && !entry.script_urls.empty()) {
-        entries.push_back(std::move(entry));
-      }
-    }
-  } catch (const std::exception& ex) {
-    if (error) {
-      *error = std::string("failed to parse script registry JSON: ") + ex.what();
+    return {};
+  }
+  const auto* item_array = items->get_if<glz::json_t::array_t>();
+  if (item_array == nullptr) {
+    if (error != nullptr) {
+      *error = "script registry JSON is missing array field 'items'";
     }
     return {};
   }
 
-  if (error) {
+  std::vector<RegistryEntry> entries;
+  for (const auto& item : *item_array) {
+    RegistryEntry entry;
+    entry.id = vinput::json::String(item, "id");
+    entry.short_id = vinput::json::String(item, "short_id");
+    entry.version = vinput::json::String(item, "version");
+    entry.sha256 = vinput::json::String(item, "sha256");
+    entry.vinput_version = vinput::json::String(item, "vinput_version");
+    entry.stream = vinput::json::Bool(item, "stream");
+    entry.command = vinput::json::String(item, "command");
+    entry.readme_url = vinput::json::String(item, "readme_url");
+    for (auto& url : vinput::json::Strings(item, "script_urls")) {
+      if (!url.empty()) {
+        entry.script_urls.push_back(std::move(url));
+      }
+    }
+    if (const auto* envs = vinput::json::Find(item, "envs"); envs != nullptr && envs->is_array()) {
+      for (const auto& value : envs->get_array()) {
+        if (!value.is_object()) {
+          continue;
+        }
+        EnvSpec env;
+        env.name = vinput::json::String(value, "name");
+        env.required = vinput::json::Bool(value, "required");
+        if (!env.name.empty()) {
+          entry.envs.push_back(std::move(env));
+        }
+      }
+    }
+    if (!entry.id.empty() && !entry.command.empty() && !entry.script_urls.empty()) {
+      entries.push_back(std::move(entry));
+    }
+  }
+
+  if (error != nullptr) {
     error->clear();
   }
   return entries;
@@ -153,7 +157,7 @@ bool EnsureExecutable(const fs::path& path, std::string* error) {
   fs::permissions(path, fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec,
                   fs::perm_options::add, ec);
   if (ec) {
-    if (error) {
+    if (error != nullptr) {
       *error = "failed to mark script executable: " + ec.message();
     }
     return false;
@@ -163,7 +167,7 @@ bool EnsureExecutable(const fs::path& path, std::string* error) {
 
 void FillDefaultEnvMap(const std::vector<EnvSpec>& envs,
                        std::map<std::string, std::string>* target) {
-  if (!target) {
+  if (target == nullptr) {
     return;
   }
   for (const auto& env : envs) {
@@ -179,7 +183,7 @@ bool IsManagedScriptPath(const fs::path& expected, const std::vector<std::string
 }
 
 CommandAsrProvider* GetCommandAsrProvider(AsrProvider* provider) {
-  return provider ? std::get_if<CommandAsrProvider>(provider) : nullptr;
+  return provider != nullptr ? std::get_if<CommandAsrProvider>(provider) : nullptr;
 }
 
 std::vector<RegistryEntry> FetchRegistryImpl(const CoreConfig* config, Kind kind,
@@ -187,7 +191,7 @@ std::vector<RegistryEntry> FetchRegistryImpl(const CoreConfig* config, Kind kind
                                              std::string* error, std::string* resolved_registry_url,
                                              std::vector<std::string>* warnings) {
   if (urls.empty()) {
-    if (error) {
+    if (error != nullptr) {
       *error = "no script registry URLs configured";
     }
     return {};
@@ -196,20 +200,20 @@ std::vector<RegistryEntry> FetchRegistryImpl(const CoreConfig* config, Kind kind
   std::string content;
   vinput::download::Options options;
   options.timeout_seconds = 30;
-  options.max_bytes = 4 * 1024 * 1024;
+  options.max_bytes = 4ULL * 1024ULL * 1024ULL;
   vinput::download::Result result;
   if (!vinput::registry::FetchRegistryText(config, urls,
                                            kind == Kind::kAsrProvider
                                                ? vinput::registry::cache::AsrProviderRegistryPath()
                                                : vinput::registry::cache::LlmAdapterRegistryPath(),
                                            options, &content, &result, error, warnings)) {
-    if (resolved_registry_url) {
+    if (resolved_registry_url != nullptr) {
       resolved_registry_url->clear();
     }
     return {};
   }
 
-  if (resolved_registry_url) {
+  if (resolved_registry_url != nullptr) {
     *resolved_registry_url = result.resolved_url;
   }
   return ParseRegistryJson(content, error);
@@ -303,7 +307,7 @@ bool DownloadScript(const RegistryEntry& entry, Kind kind, std::filesystem::path
 
   const fs::path path = DefaultLocalScriptPath(kind, entry.id);
   if (path.empty()) {
-    if (error) {
+    if (error != nullptr) {
       *error = "invalid script id: " + entry.id;
     }
     return false;
@@ -312,7 +316,7 @@ bool DownloadScript(const RegistryEntry& entry, Kind kind, std::filesystem::path
   std::error_code ec;
   fs::create_directories(path.parent_path(), ec);
   if (ec) {
-    if (error) {
+    if (error != nullptr) {
       *error = "failed to create script directory: " + ec.message();
     }
     return false;
@@ -413,19 +417,19 @@ bool DownloadScript(const RegistryEntry& entry, Kind kind, std::filesystem::path
 
 bool MaterializeAsrProvider(CoreConfig* config, const RegistryEntry& entry,
                             const fs::path& script_path, std::string* error) {
-  if (!config) {
-    if (error) {
+  if (config == nullptr) {
+    if (error != nullptr) {
       *error = "config is null";
     }
     return false;
   }
 
-  auto it = std::find_if(
-      config->asr.providers.begin(), config->asr.providers.end(),
-      [&entry](const AsrProvider& provider) { return AsrProviderId(provider) == entry.id; });
+  auto it = std::ranges::find_if(config->asr.providers, [&entry](const AsrProvider& provider) {
+    return AsrProviderId(provider) == entry.id;
+  });
   const fs::path managed_path = DefaultLocalScriptPath(Kind::kAsrProvider, entry.id);
   if (managed_path.empty()) {
-    if (error) {
+    if (error != nullptr) {
       *error = "invalid ASR provider id: " + entry.id;
     }
     return false;
@@ -438,11 +442,11 @@ bool MaterializeAsrProvider(CoreConfig* config, const RegistryEntry& entry,
     provider.command = entry.command;
     provider.args = {script_path.string()};
     FillDefaultEnvMap(entry.envs, &provider.env);
-    config->asr.providers.push_back(std::move(provider));
+    config->asr.providers.emplace_back(std::move(provider));
   } else {
     auto* command_provider = GetCommandAsrProvider(&(*it));
-    if (!command_provider || !IsManagedScriptPath(managed_path, command_provider->args)) {
-      if (error) {
+    if (command_provider == nullptr || !IsManagedScriptPath(managed_path, command_provider->args)) {
+      if (error != nullptr) {
         *error = "refusing to overwrite user-defined ASR provider: " + entry.id;
       }
       return false;
@@ -455,7 +459,7 @@ bool MaterializeAsrProvider(CoreConfig* config, const RegistryEntry& entry,
     FillDefaultEnvMap(entry.envs, &command_provider->env);
   }
 
-  if (error) {
+  if (error != nullptr) {
     error->clear();
   }
   return true;
@@ -464,18 +468,18 @@ bool MaterializeAsrProvider(CoreConfig* config, const RegistryEntry& entry,
 bool MaterializeLlmAdapter(CoreConfig* config, const RegistryEntry& entry,
                            const fs::path& script_path, std::string* error,
                            const std::map<std::string, std::string>& env_overrides) {
-  if (!config) {
-    if (error) {
+  if (config == nullptr) {
+    if (error != nullptr) {
       *error = "config is null";
     }
     return false;
   }
 
-  auto it = std::find_if(config->llm.adapters.begin(), config->llm.adapters.end(),
-                         [&entry](const LlmAdapter& adapter) { return adapter.id == entry.id; });
+  auto it = std::ranges::find_if(
+      config->llm.adapters, [&entry](const LlmAdapter& adapter) { return adapter.id == entry.id; });
   const fs::path managed_path = DefaultLocalScriptPath(Kind::kLlmAdapter, entry.id);
   if (managed_path.empty()) {
-    if (error) {
+    if (error != nullptr) {
       *error = "invalid adapter id: " + entry.id;
     }
     return false;
@@ -490,7 +494,7 @@ bool MaterializeLlmAdapter(CoreConfig* config, const RegistryEntry& entry,
     config->llm.adapters.push_back(std::move(adapter));
   } else {
     if (!IsManagedScriptPath(managed_path, it->args)) {
-      if (error) {
+      if (error != nullptr) {
         *error = "refusing to overwrite user-defined adapter: " + entry.id;
       }
       return false;
@@ -514,7 +518,7 @@ bool MaterializeLlmAdapter(CoreConfig* config, const RegistryEntry& entry,
     break;
   }
 
-  if (error) {
+  if (error != nullptr) {
     error->clear();
   }
   return true;

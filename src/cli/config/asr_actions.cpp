@@ -2,15 +2,15 @@
 
 #include <algorithm>
 #include <filesystem>
-#include <fstream>
-#include <nlohmann/json.hpp>
-#include <optional>
+#include <glaze/json/json_t.hpp>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include "common/config/core_config.h"
 #include "common/dbus/asr_backend_state_utils.h"
 #include "common/i18n.h"
+#include "common/json/json_access.h"
 #include "common/registry/installed_manifest.h"
 #include "common/registry/registry_i18n.h"
 #include "common/registry/registry_scripts.h"
@@ -25,9 +25,19 @@
 #include "common/utils/download_progress.h"
 #endif
 
+#include <cstdint>
+#include <cstdio>
+#include <string>
+#include <variant>
+
+#include "common/config/core_config_types.h"
+#include "common/dbus/dbus_interface.h"
+
 #include "cli/runtime/dbus_client.h"
+#include "cli/utils/cli_context.h"
 #include "cli/utils/cli_helpers.h"
 #include "cli/utils/editor_utils.h"
+#include "cli/utils/formatter.h"
 #include "cli/utils/resource_utils.h"
 
 namespace {
@@ -95,18 +105,18 @@ bool SaveAsrConfigAndReload(const CoreConfig& config, Formatter& fmt) {
 #if VINPUT_ENABLE_LOCAL_ASR
 const LocalAsrProvider* PreferredLocalProvider(const CoreConfig& config) {
   const AsrProvider* provider = ResolvePreferredLocalAsrProvider(config);
-  if (!provider) {
+  if (provider == nullptr) {
     return nullptr;
   }
   return std::get_if<LocalAsrProvider>(provider);
 }
 
 LocalAsrProvider* PreferredLocalProvider(CoreConfig* config) {
-  if (!config) {
+  if (config == nullptr) {
     return nullptr;
   }
   const AsrProvider* provider = ResolvePreferredLocalAsrProvider(*config);
-  if (!provider) {
+  if (provider == nullptr) {
     return nullptr;
   }
   const std::string providerId = AsrProviderId(*provider);
@@ -172,7 +182,7 @@ std::filesystem::path ResolveEditableScriptPath(const AsrProvider& provider) {
 } // namespace
 
 int RunAsrConfigList(Formatter& fmt, const CliContext& ctx) {
-  CoreConfig config = LoadCoreConfig();
+  const CoreConfig config = LoadCoreConfig();
   const auto display_map =
       vinput::cli::FetchScriptDisplayMap(config, vinput::script::Kind::kAsrProvider);
 #if VINPUT_ENABLE_LOCAL_ASR
@@ -180,7 +190,7 @@ int RunAsrConfigList(Formatter& fmt, const CliContext& ctx) {
 #endif
 
   if (ctx.json_output) {
-    nlohmann::json providers = nlohmann::json::array();
+    glz::json_t::array_t providers;
     for (const auto& provider : config.asr.providers) {
 #if !VINPUT_ENABLE_LOCAL_ASR
       if (std::holds_alternative<LocalAsrProvider>(provider)) {
@@ -188,7 +198,7 @@ int RunAsrConfigList(Formatter& fmt, const CliContext& ctx) {
       }
 #endif
       const std::string machine_id = AsrProviderId(provider);
-      nlohmann::json entry = {
+      glz::json_t entry = {
           {"id", vinput::cli::HumanizeResourceId(display_map, machine_id)},
           {"machine_id", machine_id},
           {"type", std::string(AsrProviderType(provider))},
@@ -216,17 +226,17 @@ int RunAsrConfigList(Formatter& fmt, const CliContext& ctx) {
 #endif
           if (const auto* command = std::get_if<CommandAsrProvider>(&provider)) {
         entry["command"] = command->command;
-        entry["args"] = command->args;
-        entry["env"] = command->env;
+        entry["args"] = vinput::json::FromStrings(command->args);
+        entry["env"] = vinput::json::FromStringMap(command->env);
       }
-      providers.push_back(std::move(entry));
+      providers.emplace_back(std::move(entry));
     }
-    fmt.PrintJson(providers);
+    fmt.PrintJson(glz::json_t(std::move(providers)));
     return 0;
   }
 
-  std::vector<std::string> headers = {_("ID"),     _("TITLE"), _("TYPE"),
-                                      _("ACTIVE"), _("MODEL"), _("README")};
+  const std::vector<std::string> headers = {_("ID"),     _("TITLE"), _("TYPE"),
+                                            _("ACTIVE"), _("MODEL"), _("README")};
   std::vector<std::vector<std::string>> rows;
   for (const auto& provider : config.asr.providers) {
 #if !VINPUT_ENABLE_LOCAL_ASR
@@ -269,10 +279,9 @@ int RunAsrConfigRemove(const std::string& id, Formatter& fmt, const CliContext& 
     return 1;
   }
   auto& providers = config.asr.providers;
-  auto it =
-      std::find_if(providers.begin(), providers.end(), [&resolved_id](const AsrProvider& provider) {
-        return AsrProviderId(provider) == resolved_id;
-      });
+  auto it = std::ranges::find_if(providers, [&resolved_id](const AsrProvider& provider) {
+    return AsrProviderId(provider) == resolved_id;
+  });
   if (it == providers.end()) {
     fmt.PrintError(vinput::str::FmtStr(_("ASR provider '%s' not found."), id));
     return 1;
@@ -364,11 +373,12 @@ int RunAsrConfigListProviders(bool available, Formatter& fmt, const CliContext& 
   };
 
   if (ctx.json_output) {
-    nlohmann::json arr = nlohmann::json::array();
+    glz::json_t::array_t arr;
     for (const auto& entry : entries) {
-      nlohmann::json envs = nlohmann::json::array();
+      glz::json_t::array_t envs;
       for (const auto& env : entry.envs) {
-        envs.push_back({{"name", env.name}, {"required", env.required}});
+        glz::json_t json_entry = {{"name", env.name}, {"required", env.required}};
+        envs.emplace_back(std::move(json_entry));
       }
       const bool installed = isInstalled(entry.id);
       const auto ver_info = vinput::script::CheckResourceVersion(
@@ -382,25 +392,27 @@ int RunAsrConfigListProviders(bool available, Formatter& fmt, const CliContext& 
                          : "installed";
       }
 
-      arr.push_back({
+      glz::json_t json_entry = {
           {"id", vinput::cli::HumanizeResourceId(entry.id, entry.short_id)},
           {"machine_id", entry.id},
           {"title", display_map.at(entry.id).title},
           {"description", display_map.at(entry.id).description},
           {"readme_url", entry.readme_url},
           {"stream", entry.stream},
-          {"envs", envs},
+          {"envs", glz::json_t(std::move(envs))},
           {"status", status_str},
           {"installed_version", ver_info.installed_version},
           {"remote_version", ver_info.remote_version},
           {"vinput_version", ver_info.vinput_version},
-      });
+      };
+      arr.emplace_back(std::move(json_entry));
     }
-    fmt.PrintJson(arr);
+    fmt.PrintJson(glz::json_t(std::move(arr)));
     return 0;
   }
 
-  std::vector<std::string> headers = {_("ID"), _("TITLE"), _("MODE"), _("STATUS"), _("README")};
+  const std::vector<std::string> headers = {_("ID"), _("TITLE"), _("MODE"), _("STATUS"),
+                                            _("README")};
   std::vector<std::vector<std::string>> rows;
   for (const auto& entry : entries) {
     const bool installed = isInstalled(entry.id);
@@ -462,9 +474,8 @@ int RunAsrConfigInstallProvider(const std::string& selector, Formatter& fmt,
     return 1;
   }
 
-  const auto it =
-      std::find_if(entries.begin(), entries.end(),
-                   [&id](const vinput::script::RegistryEntry& entry) { return entry.id == id; });
+  const auto it = std::ranges::find_if(
+      entries, [&id](const vinput::script::RegistryEntry& entry) { return entry.id == id; });
   if (it == entries.end()) {
     fmt.PrintError(vinput::str::FmtStr(_("ASR provider '%s' not found in registry."), id));
     return 1;
@@ -554,8 +565,7 @@ int RunAsrConfigUpdateProvider(const std::string& selector, bool all, bool force
         continue;
       }
       const std::string id = AsrProviderId(provider);
-      auto it =
-          std::find_if(entries.begin(), entries.end(), [&id](const auto& e) { return e.id == id; });
+      auto it = std::ranges::find_if(entries, [&id](const auto& e) { return e.id == id; });
       if (it != entries.end()) {
         if (updateSingle(*it)) {
           any_updated = true;
@@ -569,8 +579,7 @@ int RunAsrConfigUpdateProvider(const std::string& selector, bool all, bool force
       fmt.PrintError(error);
       return 1;
     }
-    auto it =
-        std::find_if(entries.begin(), entries.end(), [&id](const auto& e) { return e.id == id; });
+    auto it = std::ranges::find_if(entries, [&id](const auto& e) { return e.id == id; });
     if (it == entries.end()) {
       fmt.PrintError(vinput::str::FmtStr(_("ASR provider '%s' not found in registry."), selector));
       return 1;
@@ -599,7 +608,7 @@ int RunAsrConfigUpdateProvider(const std::string& selector, bool all, bool force
 
 int RunAsrConfigEdit(const std::string& id, Formatter& fmt, const CliContext& ctx) {
   (void)ctx;
-  CoreConfig config = LoadCoreConfig();
+  const CoreConfig config = LoadCoreConfig();
   std::string error;
   const std::string resolved_id =
       vinput::cli::ResolveInstalledAsrProviderSelector(config, id, &error);
@@ -608,7 +617,7 @@ int RunAsrConfigEdit(const std::string& id, Formatter& fmt, const CliContext& ct
     return 1;
   }
   const AsrProvider* provider = ResolveAsrProvider(config, resolved_id);
-  if (!provider) {
+  if (provider == nullptr) {
     fmt.PrintError(vinput::str::FmtStr(_("ASR provider '%s' not found."), id));
     return 1;
   }
@@ -637,8 +646,8 @@ int RunAsrConfigEdit(const std::string& id, Formatter& fmt, const CliContext& ct
 
 #if VINPUT_ENABLE_LOCAL_ASR
 int RunAsrConfigListModels(bool available, Formatter& fmt, const CliContext& ctx) {
-  CoreConfig config = LoadCoreConfig();
-  ModelManager manager(ResolveModelBaseDir(config).string());
+  const CoreConfig config = LoadCoreConfig();
+  const ModelManager manager(ResolveModelBaseDir(config).string());
   const std::string activeModel = ResolvePreferredLocalModel(config);
   const auto installed_display_map = vinput::cli::FetchModelDisplayMap(config);
 
@@ -650,9 +659,9 @@ int RunAsrConfigListModels(bool available, Formatter& fmt, const CliContext& ctx
       return 1;
     }
 
-    ModelRepository repository(ResolveModelBaseDir(config).string());
+    const ModelRepository repository(ResolveModelBaseDir(config).string());
     std::string error;
-    const auto remoteModels = repository.FetchRegistry(config, registryUrls, &error);
+    const auto remoteModels = ModelRepository::FetchRegistry(config, registryUrls, &error);
     if (!error.empty()) {
       fmt.PrintError(error);
       return 1;
@@ -664,14 +673,15 @@ int RunAsrConfigListModels(bool available, Formatter& fmt, const CliContext& ctx
     const auto installedModels = manager.ListDetailed(activeModel);
 
     auto isInstalled = [&installedModels](const std::string& id) {
-      return std::any_of(installedModels.begin(), installedModels.end(),
-                         [&id](const ModelSummary& model) { return model.id == id; });
+      return std::ranges::any_of(installedModels,
+                                 [&id](const ModelSummary& model) { return model.id == id; });
     };
 
     if (ctx.json_output) {
-      nlohmann::json arr = nlohmann::json::array();
+      glz::json_t::array_t arr;
+      arr.reserve(remoteModels.size());
       for (const auto& model : remoteModels) {
-        arr.push_back({
+        glz::json_t json_entry = {
             {"id", vinput::cli::HumanizeResourceId(model.id, model.short_id)},
             {"machine_id", model.id},
             {"title", display_map.at(model.id).title},
@@ -682,15 +692,17 @@ int RunAsrConfigListModels(bool available, Formatter& fmt, const CliContext& ctx
             {"size_bytes", model.size_bytes},
             {"size", vinput::file::FormatFileSize(model.size_bytes)},
             {"status", isInstalled(model.id) ? "installed" : "available"},
-        });
+        };
+        arr.emplace_back(std::move(json_entry));
       }
-      fmt.PrintJson(arr);
+      fmt.PrintJson(glz::json_t(std::move(arr)));
       return 0;
     }
 
-    std::vector<std::string> headers = {_("ID"),   _("TITLE"),    _("TYPE"),  _("LANGUAGE"),
-                                        _("SIZE"), _("HOTWORDS"), _("STATUS")};
+    const std::vector<std::string> headers = {_("ID"),   _("TITLE"),    _("TYPE"),  _("LANGUAGE"),
+                                              _("SIZE"), _("HOTWORDS"), _("STATUS")};
     std::vector<std::vector<std::string>> rows;
+    rows.reserve(remoteModels.size());
     for (const auto& model : remoteModels) {
       rows.push_back({vinput::cli::HumanizeResourceId(model.id, model.short_id),
                       display_map.at(model.id).title, model.model_type(), model.language,
@@ -705,7 +717,8 @@ int RunAsrConfigListModels(bool available, Formatter& fmt, const CliContext& ctx
   const auto models = manager.ListDetailed(activeModel);
 
   if (ctx.json_output) {
-    nlohmann::json arr = nlohmann::json::array();
+    glz::json_t::array_t arr;
+    arr.reserve(models.size());
     for (const auto& model : models) {
       std::string status = "installed";
       if (model.state == ModelState::Active) {
@@ -714,7 +727,7 @@ int RunAsrConfigListModels(bool available, Formatter& fmt, const CliContext& ctx
         status = "broken";
       }
       const auto display_it = installed_display_map.find(model.id);
-      arr.push_back({
+      glz::json_t json_entry = {
           {"id", vinput::cli::HumanizeResourceId(installed_display_map, model.id)},
           {"machine_id", model.id},
           {"title",
@@ -725,14 +738,15 @@ int RunAsrConfigListModels(bool available, Formatter& fmt, const CliContext& ctx
           {"size_bytes", model.size_bytes},
           {"size", vinput::file::FormatFileSize(model.size_bytes)},
           {"status", status},
-      });
+      };
+      arr.emplace_back(std::move(json_entry));
     }
-    fmt.PrintJson(arr);
+    fmt.PrintJson(glz::json_t(std::move(arr)));
     return 0;
   }
 
-  std::vector<std::string> headers = {_("ID"),   _("TITLE"),    _("TYPE"),  _("LANGUAGE"),
-                                      _("SIZE"), _("HOTWORDS"), _("STATUS")};
+  const std::vector<std::string> headers = {_("ID"),   _("TITLE"),    _("TYPE"),  _("LANGUAGE"),
+                                            _("SIZE"), _("HOTWORDS"), _("STATUS")};
   std::vector<std::vector<std::string>> rows;
   for (const auto& model : models) {
     std::string status = _("Installed");
@@ -763,9 +777,9 @@ int RunAsrConfigInstallModel(const std::string& selector, Formatter& fmt, const 
     return 1;
   }
 
-  ModelRepository repository(baseDir.string());
+  const ModelRepository repository(baseDir.string());
   std::string error;
-  const auto remoteModels = repository.FetchRegistry(config, registryUrls, &error);
+  const auto remoteModels = ModelRepository::FetchRegistry(config, registryUrls, &error);
   if (!error.empty()) {
     fmt.PrintError(error);
     return 1;
@@ -809,7 +823,7 @@ int RunAsrConfigInstallModel(const std::string& selector, Formatter& fmt, const 
 int RunAsrConfigRemoveModel(const std::string& selector, Formatter& fmt, const CliContext& ctx) {
   (void)ctx;
   CoreConfig config = LoadCoreConfig();
-  ModelManager manager(ResolveModelBaseDir(config).string());
+  const ModelManager manager(ResolveModelBaseDir(config).string());
   const std::string activeModel = ResolvePreferredLocalModel(config);
   const auto models = manager.ListDetailed(activeModel);
   const auto display_map = vinput::cli::FetchModelDisplayMap(config);
@@ -839,7 +853,7 @@ int RunAsrConfigRemoveModel(const std::string& selector, Formatter& fmt, const C
 int RunAsrConfigUseModel(const std::string& selector, Formatter& fmt, const CliContext& ctx) {
   (void)ctx;
   CoreConfig config = LoadCoreConfig();
-  ModelManager manager(ResolveModelBaseDir(config).string());
+  const ModelManager manager(ResolveModelBaseDir(config).string());
   const std::string activeModel = ResolvePreferredLocalModel(config);
   const auto models = manager.ListDetailed(activeModel);
   const auto display_map = vinput::cli::FetchModelDisplayMap(config);
@@ -868,9 +882,9 @@ int RunAsrConfigUseModel(const std::string& selector, Formatter& fmt, const CliC
 }
 
 int RunAsrConfigModelInfo(const std::string& selector, Formatter& fmt, const CliContext& ctx) {
-  CoreConfig config = LoadCoreConfig();
+  const CoreConfig config = LoadCoreConfig();
   const std::string baseDir = ResolveModelBaseDir(config).string();
-  ModelManager manager(baseDir);
+  const ModelManager manager(baseDir);
   const std::string activeModel = ResolvePreferredLocalModel(config);
   const auto models = manager.ListDetailed(activeModel);
   const auto display_map = vinput::cli::FetchModelDisplayMap(config);
@@ -886,14 +900,14 @@ int RunAsrConfigModelInfo(const std::string& selector, Formatter& fmt, const Cli
     return 1;
   }
 
-  ModelManager selectedManager(baseDir, id);
+  const ModelManager selectedManager(baseDir, id);
   const ModelInfo info = selectedManager.GetModelInfo(&error);
   if (!error.empty()) {
     fmt.PrintError(error);
     return 1;
   }
 
-  nlohmann::json obj;
+  glz::json_t obj = glz::json_t(glz::json_t::object_t{});
   obj["id"] = vinput::cli::HumanizeResourceId(display_map, id);
   obj["machine_id"] = id;
   obj["backend"] = info.backend;
@@ -904,14 +918,14 @@ int RunAsrConfigModelInfo(const std::string& selector, Formatter& fmt, const Cli
   obj["size_bytes"] = info.size_bytes;
   obj["recognizer"] = info.recognizer_config;
   obj["model"] = info.model_config;
-  obj["resolved_files"] = info.files;
+  obj["resolved_files"] = vinput::json::FromStringMap(info.files);
 
   if (ctx.json_output) {
     fmt.PrintJson(obj);
     return 0;
   }
 
-  std::vector<std::string> headers = {_("FIELD"), _("VALUE")};
+  const std::vector<std::string> headers = {_("FIELD"), _("VALUE")};
   std::vector<std::vector<std::string>> rows = {
       {"id", vinput::cli::HumanizeResourceId(display_map, id)},
       {"backend", info.backend},
@@ -924,16 +938,16 @@ int RunAsrConfigModelInfo(const std::string& selector, Formatter& fmt, const Cli
   for (const auto& [key, value] : info.files) {
     rows.push_back({std::string("file.") + key, value});
   }
-  rows.push_back({"recognizer", info.recognizer_config.dump()});
-  rows.push_back({"model", info.model_config.dump()});
+  rows.push_back({"recognizer", vinput::json::ToText(info.recognizer_config)});
+  rows.push_back({"model", vinput::json::ToText(info.model_config)});
   fmt.PrintTable(headers, rows);
   return 0;
 }
 
 int RunAsrConfigGetHotword(Formatter& fmt, const CliContext& ctx) {
-  CoreConfig config = LoadCoreConfig();
+  const CoreConfig config = LoadCoreConfig();
   const auto* provider = PreferredLocalProvider(config);
-  const std::string hotwordPath = provider ? provider->hotwordsFile : "";
+  const std::string hotwordPath = provider != nullptr ? provider->hotwordsFile : "";
 
   if (ctx.json_output) {
     fmt.PrintJson({{"hotwords_file", hotwordPath}});
@@ -952,7 +966,7 @@ int RunAsrConfigSetHotword(const std::string& path, Formatter& fmt, const CliCon
   (void)ctx;
   CoreConfig config = LoadCoreConfig();
   auto* provider = PreferredLocalProvider(&config);
-  if (!provider) {
+  if (provider == nullptr) {
     fmt.PrintError(_("No local ASR provider configured."));
     return 1;
   }
@@ -968,7 +982,7 @@ int RunAsrConfigClearHotword(Formatter& fmt, const CliContext& ctx) {
   (void)ctx;
   CoreConfig config = LoadCoreConfig();
   auto* provider = PreferredLocalProvider(&config);
-  if (!provider) {
+  if (provider == nullptr) {
     fmt.PrintError(_("No local ASR provider configured."));
     return 1;
   }
@@ -982,9 +996,9 @@ int RunAsrConfigClearHotword(Formatter& fmt, const CliContext& ctx) {
 
 int RunAsrConfigEditHotword(Formatter& fmt, const CliContext& ctx) {
   (void)ctx;
-  CoreConfig config = LoadCoreConfig();
+  const CoreConfig config = LoadCoreConfig();
   const auto* provider = PreferredLocalProvider(config);
-  const std::string hotwordPath = provider ? provider->hotwordsFile : "";
+  const std::string hotwordPath = provider != nullptr ? provider->hotwordsFile : "";
   if (hotwordPath.empty()) {
     fmt.PrintError(_("No hotwords file configured. Use 'hotword set <path>' first."));
     return 1;
