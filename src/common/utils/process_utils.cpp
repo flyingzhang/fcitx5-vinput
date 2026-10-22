@@ -4,7 +4,6 @@
 #include <array>
 #include <cerrno>
 #include <chrono>
-#include <csignal>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -24,6 +23,12 @@
 #include <unistd.h>
 #include <vector>
 
+extern "C" {
+#include <signal.h> // SIGKILL
+#include <time.h>   // pid_t
+}
+
+#include "common/utils/expected.h"
 #include "common/utils/interpolation.h"
 
 namespace vinput::process {
@@ -98,6 +103,36 @@ bool TryReapProcess(pid_t pid, int* exit_code) {
     }
   }
   return true;
+}
+
+void TerminateProcessBounded(pid_t pid, std::chrono::milliseconds graceful_timeout,
+                             std::chrono::milliseconds force_timeout) {
+  if (pid <= 0) {
+    return;
+  }
+
+  // Reaps the child within `timeout`. ECHILD means it was already reaped
+  // elsewhere (or is not our child), so there is nothing left to wait for.
+  const auto wait_for_exit = [pid](std::chrono::milliseconds timeout) {
+    constexpr auto kPollInterval = std::chrono::milliseconds(100);
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+      errno = 0;
+      if (TryReapProcess(pid) || errno == ECHILD) {
+        return true;
+      }
+      std::this_thread::sleep_for(kPollInterval);
+    }
+    return TryReapProcess(pid);
+  };
+
+  (void)syscall(SYS_kill, pid, SIGTERM);
+  if (wait_for_exit(graceful_timeout)) {
+    return;
+  }
+
+  (void)syscall(SYS_kill, pid, SIGKILL);
+  (void)wait_for_exit(force_timeout);
 }
 
 bool CreateCloexecPipe(int pipefd[2]) {
@@ -342,17 +377,10 @@ CommandResult RunCommandWithInput(const CommandSpec& spec, std::span<const std::
   }
 }
 
-bool SpawnForMonitoring(const CommandSpec& spec, const std::filesystem::path& working_dir,
-                        SpawnedProcess* process_out, std::string* error) {
-  if (process_out != nullptr) {
-    process_out->pid = -1;
-    process_out->stderr_fd = -1;
-  }
+Expected<SpawnedProcess> SpawnForMonitoring(const CommandSpec& spec,
+                                            const std::filesystem::path& working_dir) {
   if (spec.command.empty()) {
-    if (error != nullptr) {
-      *error = "Command is empty.";
-    }
-    return false;
+    return UnexpectedError("Command is empty.");
   }
 
   const auto cmd = BuildCmd(spec);
@@ -364,30 +392,21 @@ bool SpawnForMonitoring(const CommandSpec& spec, const std::filesystem::path& wo
         subprocess::error{subprocess::PIPE}, subprocess::cwd{working_dir.string()},
         subprocess::environment{env_map}, subprocess::session_leader{true});
 
-    if (process_out != nullptr) {
-      process_out->pid = proc.pid();
-      FILE* err_fp = proc.error();
-      if (err_fp != nullptr) {
-        const int dup_fd = fcntl(subprocess_fileno(err_fp), F_DUPFD_CLOEXEC, 0);
-        if (dup_fd < 0) {
-          if (error != nullptr) {
-            *error = "fcntl F_DUPFD_CLOEXEC failed: " + std::string(std::strerror(errno));
-          }
-          proc.kill();
-          return false;
-        }
-        process_out->stderr_fd = dup_fd;
+    SpawnedProcess process_out{.pid = proc.pid(), .stderr_fd = -1};
+    FILE* err_fp = proc.error();
+    if (err_fp != nullptr) {
+      const int dup_fd = fcntl(subprocess_fileno(err_fp), F_DUPFD_CLOEXEC, 0);
+      if (dup_fd < 0) {
+        const std::string err =
+            "fcntl F_DUPFD_CLOEXEC failed: " + std::string(std::strerror(errno));
+        proc.kill();
+        return UnexpectedError(err);
       }
+      process_out.stderr_fd = dup_fd;
     }
-    if (error != nullptr) {
-      error->clear();
-    }
-    return true;
+    return process_out;
   } catch (const std::exception& e) {
-    if (error != nullptr) {
-      *error = e.what();
-    }
-    return false;
+    return UnexpectedError(e.what());
   }
 }
 
@@ -406,25 +425,26 @@ bool RunCommandSilent(const CommandSpec& spec, int* exit_code) {
   return !result.launch_failed && !result.timed_out && result.exit_code == 0;
 }
 
-bool RunCommandCaptureStdout(const CommandSpec& spec, std::string* stdout_text, int* exit_code) {
-  if (stdout_text != nullptr) {
-    stdout_text->clear();
-  }
+Expected<std::string> RunCommandCaptureStdout(const CommandSpec& spec) {
   if (spec.command.empty()) {
-    if (exit_code != nullptr) {
-      *exit_code = -1;
-    }
-    return false;
+    return UnexpectedError("Command is empty.");
   }
 
   const auto result = RunCommandWithInput(spec, {});
-  if (stdout_text != nullptr) {
-    *stdout_text = result.stdout_text;
+  if (result.launch_failed) {
+    return UnexpectedError(!result.stderr_text.empty() ? result.stderr_text
+                                                       : "Failed to launch process.");
   }
-  if (exit_code != nullptr) {
-    *exit_code = result.exit_code;
+  if (result.timed_out) {
+    return UnexpectedError("Process timed out.");
   }
-  return !result.launch_failed && !result.timed_out && result.exit_code == 0;
+  if (result.exit_code != 0) {
+    const std::string err = !result.stderr_text.empty()
+                                ? result.stderr_text
+                                : "Process exited with code " + std::to_string(result.exit_code);
+    return UnexpectedError(err);
+  }
+  return result.stdout_text;
 }
 
 } // namespace vinput::process

@@ -1,14 +1,20 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <map>
 #include <span>
 #include <string>
 #include <string_view>
-#include <sys/types.h>
 #include <type_traits>
 #include <vector>
+
+extern "C" {
+#include <time.h> // pid_t: <chrono> pulls <time.h> in first, so <sys/types.h> would be a no-op
+}
+
+#include "common/utils/expected.h"
 
 namespace vinput::process {
 
@@ -34,10 +40,9 @@ struct SpawnedProcess {
 
 CommandResult RunCommandWithInput(const CommandSpec& spec, std::span<const std::byte> input);
 bool RunCommandSilent(const CommandSpec& spec, int* exit_code = nullptr);
-bool RunCommandCaptureStdout(const CommandSpec& spec, std::string* stdout_text,
-                             int* exit_code = nullptr);
-bool SpawnForMonitoring(const CommandSpec& spec, const std::filesystem::path& working_dir,
-                        SpawnedProcess* process_out, std::string* error);
+Expected<std::string> RunCommandCaptureStdout(const CommandSpec& spec);
+Expected<SpawnedProcess> SpawnForMonitoring(const CommandSpec& spec,
+                                            const std::filesystem::path& working_dir);
 bool CreateCloexecPipe(int pipefd[2]);
 
 // Forcefully terminates `pid` with SIGKILL and reaps it, tolerating children that
@@ -49,6 +54,11 @@ bool KillAndReap(pid_t pid);
 // populating `exit_code` with its normalized return code if non-null.
 bool TryReapProcess(pid_t pid, int* exit_code = nullptr);
 
+// Requests graceful termination, waits for a bounded interval, then escalates
+// to a forced kill and performs a final bounded reap.
+void TerminateProcessBounded(pid_t pid, std::chrono::milliseconds graceful_timeout,
+                             std::chrono::milliseconds force_timeout);
+
 // Drains complete newline-terminated lines out of an incrementally filled
 // process output buffer, leaving any unterminated tail in place. A trailing
 // '\r' is stripped so CRLF streams behave like LF ones. When `flush_tail` is
@@ -56,6 +66,16 @@ bool TryReapProcess(pid_t pid, int* exit_code = nullptr);
 // buffer is cleared. A callback returning `false` stops draining immediately.
 template <typename Callback>
 void DrainLinesFromBuffer(std::string& buffer, Callback on_line, bool flush_tail = false) {
+  // 归一化回调结果：返回 void 的回调视为“继续”，返回 bool 的回调按其值决定
+  const auto deliver = [&on_line](std::string_view line) -> bool {
+    if constexpr (std::is_void_v<std::invoke_result_t<Callback, std::string_view>>) {
+      on_line(line);
+      return true;
+    } else {
+      return static_cast<bool>(on_line(line));
+    }
+  };
+
   size_t processed = 0;
   size_t start = 0;
   bool should_stop = false;
@@ -73,13 +93,9 @@ void DrainLinesFromBuffer(std::string& buffer, Callback on_line, bool flush_tail
     start = end + 1;
     processed = start;
 
-    if constexpr (std::is_void_v<std::invoke_result_t<Callback, std::string_view>>) {
-      on_line(line);
-    } else {
-      if (!static_cast<bool>(on_line(line))) {
-        should_stop = true;
-        break;
-      }
+    if (!deliver(line)) {
+      should_stop = true;
+      break;
     }
   }
 
@@ -92,11 +108,7 @@ void DrainLinesFromBuffer(std::string& buffer, Callback on_line, bool flush_tail
     if (tail.back() == '\r') {
       tail.remove_suffix(1);
     }
-    if constexpr (std::is_void_v<std::invoke_result_t<Callback, std::string_view>>) {
-      on_line(tail);
-    } else {
-      (void)on_line(tail);
-    }
+    (void)deliver(tail);
     buffer.clear();
   }
 }
