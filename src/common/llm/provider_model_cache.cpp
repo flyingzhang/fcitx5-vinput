@@ -35,11 +35,11 @@ bool ReadCacheFile(glz::json_t* out) {
   *out = EmptyObject();
 
   const auto path = vinput::path::ProviderModelCachePath();
-  std::string content;
-  if (!vinput::file::ReadTextFile(path, &content, nullptr)) {
+  const auto content = vinput::file::ReadTextFile(path);
+  if (!content) {
     return false;
   }
-  if (bool(glz::read_json(*out, content)) || !out->is_object()) {
+  if (bool(glz::read_json(*out, *content)) || !out->is_object()) {
     *out = EmptyObject();
     return false;
   }
@@ -55,7 +55,14 @@ bool WriteCacheFile(const glz::json_t& data, std::string* error) {
     }
     return false;
   }
-  return vinput::file::AtomicWriteTextFile(path, content, error);
+  auto res = vinput::file::AtomicWriteTextFile(path, content);
+  if (!res) {
+    if (error != nullptr) {
+      *error = res.error();
+    }
+    return false;
+  }
+  return true;
 }
 
 } // namespace

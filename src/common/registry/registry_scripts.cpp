@@ -356,18 +356,18 @@ bool DownloadScript(const RegistryEntry& entry, Kind kind, std::filesystem::path
 
   std::string actual_sha;
   if (!entry.sha256.empty()) {
-    std::string sha_error;
-    actual_sha = vinput::file::ComputeFileSha256(tmp_path, &sha_error);
-    if (!sha_error.empty() || actual_sha != entry.sha256) {
+    auto sha_res = vinput::file::ComputeFileSha256(tmp_path);
+    if (!sha_res || *sha_res != entry.sha256) {
       std::error_code rm_ec;
       fs::remove(tmp_path, rm_ec);
       if (error != nullptr) {
-        *error = !sha_error.empty() ? sha_error
-                                    : "SHA-256 mismatch for " + entry.id + ": expected " +
-                                          entry.sha256 + ", got " + actual_sha;
+        *error = !sha_res ? sha_res.error()
+                          : "SHA-256 mismatch for " + entry.id + ": expected " + entry.sha256 +
+                                ", got " + *sha_res;
       }
       return false;
     }
+    actual_sha = std::move(*sha_res);
   }
 
   if (!EnsureExecutable(tmp_path, error)) {
@@ -388,6 +388,20 @@ bool DownloadScript(const RegistryEntry& entry, Kind kind, std::filesystem::path
     return false;
   }
 
+  std::string final_sha = actual_sha;
+  if (final_sha.empty()) {
+    auto sha_res = vinput::file::ComputeFileSha256(tmp_path);
+    if (!sha_res) {
+      std::error_code rm_ec;
+      fs::remove(tmp_path, rm_ec);
+      if (error != nullptr) {
+        *error = "failed to compute sha256 for " + tmp_path.string() + ": " + sha_res.error();
+      }
+      return false;
+    }
+    final_sha = std::move(*sha_res);
+  }
+
   fs::rename(tmp_path, path, ec);
   if (ec) {
     std::error_code rm_ec;
@@ -398,8 +412,6 @@ bool DownloadScript(const RegistryEntry& entry, Kind kind, std::filesystem::path
     return false;
   }
 
-  const std::string final_sha =
-      actual_sha.empty() ? vinput::file::ComputeFileSha256(path) : actual_sha;
   auto manifest = vinput::registry::InstalledManifest::Load();
   manifest.RecordInstalled(entry.id, kind == Kind::kAsrProvider ? "provider" : "adapter",
                            entry.version, final_sha);
@@ -550,7 +562,7 @@ ResourceVersionInfo CheckResourceVersion(const vinput::registry::InstalledManife
     info.installed_version = record->version;
     info.installed_sha256 = record->sha256;
   } else if (script_exists) {
-    info.installed_sha256 = vinput::file::ComputeFileSha256(script_path);
+    info.installed_sha256 = vinput::file::ComputeFileSha256(script_path).value_or("");
   }
 
   if (!script_exists) {

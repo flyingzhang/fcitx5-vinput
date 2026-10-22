@@ -58,12 +58,8 @@ std::string ExtractAuthorization(const std::vector<HttpHeader>& headers) {
 }
 
 bool HasUserAgent(const std::vector<HttpHeader>& headers) {
-  for (const auto& h : headers) {
-    if (vinput::str::EqualsIgnoreCase(h.name, "user-agent")) {
-      return true;
-    }
-  }
-  return false;
+  return std::ranges::any_of(
+      headers, [](const auto& h) { return vinput::str::EqualsIgnoreCase(h.name, "user-agent"); });
 }
 
 struct ConnectionIdentity {
@@ -116,11 +112,13 @@ public:
           return resp;
         }
       } else {
-        if (!vinput::file::ReadTextFile(file_path, &resp.body, &resp.error_message,
-                                        request.max_response_bytes)) {
+        auto read_res = vinput::file::ReadTextFile(file_path, request.max_response_bytes);
+        if (!read_res) {
           resp.status_code = 404;
+          resp.error_message = read_res.error();
           return resp;
         }
+        resp.body = std::move(*read_res);
       }
       resp.status_code = 200;
       resp.effective_url = request.url;
@@ -408,7 +406,7 @@ public:
 
 private:
   std::shared_ptr<httplib::Client> Acquire(const ConnectionIdentity& id) {
-    const std::lock_guard<std::mutex> lock(pool_mutex_);
+    const std::scoped_lock lock(pool_mutex_);
     auto it = pool_.find(id);
     if (it != pool_.end() && !it->second.empty()) {
       auto cli = it->second.back();
@@ -422,7 +420,7 @@ private:
     if (!cli) {
       return;
     }
-    const std::lock_guard<std::mutex> lock(pool_mutex_);
+    const std::scoped_lock lock(pool_mutex_);
     if (pool_[id].size() < kMaxPoolPerHost) {
       pool_[id].push_back(cli);
     }

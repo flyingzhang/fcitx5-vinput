@@ -37,14 +37,13 @@ InstalledManifest InstalledManifest::Load(const std::filesystem::path& path) {
   InstalledManifest manifest;
   const auto actual_path = ResolveManifestPath(path);
 
-  std::string content;
-  std::string read_error;
-  if (!vinput::file::ReadTextFile(actual_path, &content, &read_error)) {
+  const auto content = vinput::file::ReadTextFile(actual_path);
+  if (!content) {
     return manifest;
   }
 
   glz::json_t root;
-  if (bool(glz::read_json(root, content))) {
+  if (bool(glz::read_json(root, *content))) {
     return manifest;
   }
   const auto* resources = vinput::json::Find(root, "resources");
@@ -99,7 +98,14 @@ bool InstalledManifest::Save(const std::filesystem::path& path, std::string* err
     return false;
   }
 
-  return vinput::file::AtomicWriteTextFile(actual_path, content, error);
+  auto res = vinput::file::AtomicWriteTextFile(actual_path, content);
+  if (!res) {
+    if (error != nullptr) {
+      *error = res.error();
+    }
+    return false;
+  }
+  return true;
 }
 
 const InstalledRecord* InstalledManifest::Get(std::string_view id) const {

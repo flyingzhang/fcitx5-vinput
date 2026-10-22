@@ -490,10 +490,9 @@ bool ModelRepository::InstallModelEntry(const RemoteModelEntry& found,
       return false;
     }
     json_content += "\n";
-    std::string write_err;
-    if (!vinput::file::AtomicWriteTextFile(json_path, json_content, &write_err)) {
+    if (auto res = vinput::file::AtomicWriteTextFile(json_path, json_content); !res) {
       if (error != nullptr) {
-        *error = "failed to write vinput-model.json: " + write_err;
+        *error = "failed to write vinput-model.json: " + res.error();
       }
       return false;
     }
@@ -598,18 +597,17 @@ bool ModelRepository::VerifySha256(const fs::path& file, const std::string& expe
     return true;
   }
 
-  std::string calc_err;
-  const std::string hex = vinput::file::ComputeFileSha256(file, &calc_err);
-  if (hex.empty()) {
+  const auto hex = vinput::file::ComputeFileSha256(file);
+  if (!hex) {
     if (error != nullptr) {
-      *error = calc_err;
+      *error = hex.error();
     }
     return false;
   }
 
-  if (hex != expected) {
+  if (*hex != expected) {
     if (error != nullptr) {
-      *error = "SHA256 mismatch: expected " + expected + ", got " + hex;
+      *error = "SHA256 mismatch: expected " + expected + ", got " + *hex;
     }
     return false;
   }

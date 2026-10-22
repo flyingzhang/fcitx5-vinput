@@ -6,6 +6,8 @@
 #include <string>
 #include <string_view>
 
+#include "common/utils/expected.h"
+
 namespace vinput::file {
 
 class ScopedTempDir {
@@ -50,7 +52,7 @@ public:
 
   // Maps the entire file into memory for read-only access.
   // For empty (0-byte) files, this succeeds and produces an empty StringView().
-  static ReadOnlyFileMapping Map(const std::filesystem::path& path, std::string* error = nullptr);
+  static Expected<ReadOnlyFileMapping> Map(const std::filesystem::path& path);
 
   [[nodiscard]] bool IsValid() const noexcept;
   [[nodiscard]] std::string_view StringView() const noexcept;
@@ -66,20 +68,17 @@ private:
 };
 
 // Convenience wrapper for ReadOnlyFileMapping::Map.
-ReadOnlyFileMapping MapFileReadOnly(const std::filesystem::path& path,
-                                    std::string* error = nullptr);
+Expected<ReadOnlyFileMapping> MapFileReadOnly(const std::filesystem::path& path);
 
 bool ResolveSymlinkPath(const std::filesystem::path& path, std::filesystem::path* resolved,
                         std::string* error);
 bool EnsureParentDirectory(const std::filesystem::path& path, std::string* error);
-bool ReadTextFile(const std::filesystem::path& path, std::string* content,
-                  std::string* error = nullptr, size_t max_bytes = 0);
-bool AtomicWriteTextFile(const std::filesystem::path& target, std::string_view content,
-                         std::string* error);
+Expected<std::string> ReadTextFile(const std::filesystem::path& path, size_t max_bytes = 0);
+Expected<void> AtomicWriteTextFile(const std::filesystem::path& target, std::string_view content);
 // Computes the SHA-256 hash of a file.
 // Uses zero-copy memory mapping for performance, falling back to streaming when mmap is
 // unavailable or for pseudo-files. Expects the target file to remain immutable during hashing.
-std::string ComputeFileSha256(const std::filesystem::path& path, std::string* error = nullptr);
+Expected<std::string> ComputeFileSha256(const std::filesystem::path& path);
 
 // Check if a directory (or its immediate parent if target does not yet exist)
 // exists, is a valid directory, and has write and search permissions (W_OK | X_OK).

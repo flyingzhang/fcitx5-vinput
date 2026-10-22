@@ -23,11 +23,16 @@
 #include <unistd.h>
 #include <utility>
 
+#include "common/utils/expected.h"
+
 extern "C" {
 #include <stdlib.h>
 }
 
 namespace {
+
+using vinput::Expected;
+using vinput::UnexpectedError;
 
 constexpr int kMaxSymlinkDepth = 32;
 
@@ -53,7 +58,7 @@ std::filesystem::path ResolveRelativeSymlinkTarget(const std::filesystem::path& 
 bool ResolveSymlinkPathImpl(const std::filesystem::path& path, std::filesystem::path* resolved,
                             std::string* error, int depth) {
   if (depth >= kMaxSymlinkDepth) {
-    if (error) {
+    if (error != nullptr) {
       *error = "Too many symlink levels while resolving " + path.string();
     }
     return false;
@@ -82,7 +87,7 @@ bool ResolveSymlinkPathImpl(const std::filesystem::path& path, std::filesystem::
     return true;
   }
   if (ec) {
-    if (error) {
+    if (error != nullptr) {
       *error = "Failed to inspect path " + path.string() + ": " + ec.message();
     }
     return false;
@@ -94,7 +99,7 @@ bool ResolveSymlinkPathImpl(const std::filesystem::path& path, std::filesystem::
 
   const auto link_target = std::filesystem::read_symlink(path, ec);
   if (ec) {
-    if (error) {
+    if (error != nullptr) {
       *error = "Failed to read symlink " + path.string() + ": " + ec.message();
     }
     return false;
@@ -108,14 +113,11 @@ constexpr size_t kStreamBufferSize = 65536;
 constexpr std::string_view kEmptyFileSha256 =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
-std::string FinalizeHashToHex(EVP_MD_CTX* ctx, std::string* error) {
+Expected<std::string> FinalizeHashToHex(EVP_MD_CTX* ctx) {
   unsigned char hash[EVP_MAX_MD_SIZE];
   unsigned int hash_len = 0;
   if (EVP_DigestFinal_ex(ctx, hash, &hash_len) != 1) {
-    if (error != nullptr) {
-      *error = "EVP_DigestFinal_ex failed";
-    }
-    return {};
+    return UnexpectedError("EVP_DigestFinal_ex failed");
   }
 
   std::string hex;
@@ -126,48 +128,33 @@ std::string FinalizeHashToHex(EVP_MD_CTX* ctx, std::string* error) {
     hex += pair;
   }
 
-  if (error != nullptr) {
-    error->clear();
-  }
   return hex;
 }
 
-std::string ComputeFileSha256StreamFallback(const std::filesystem::path& path, std::string* error) {
+Expected<std::string> ComputeFileSha256StreamFallback(const std::filesystem::path& path) {
   std::ifstream file(path, std::ios::binary);
   if (!file.is_open()) {
-    if (error != nullptr) {
-      *error = "failed to open file for SHA-256 calculation: " + path.string();
-    }
-    return {};
+    return UnexpectedError("failed to open file for SHA-256 calculation: " + path.string());
   }
 
   const std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> ctx(EVP_MD_CTX_new(),
                                                                     &EVP_MD_CTX_free);
   if (ctx == nullptr) {
-    if (error != nullptr) {
-      *error = "failed to allocate EVP_MD_CTX";
-    }
-    return {};
+    return UnexpectedError("failed to allocate EVP_MD_CTX");
   }
 
   if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1) {
-    if (error != nullptr) {
-      *error = "EVP_DigestInit_ex failed";
-    }
-    return {};
+    return UnexpectedError("EVP_DigestInit_ex failed");
   }
 
   char buffer[kStreamBufferSize];
   while (file.read(buffer, sizeof(buffer)) || file.gcount() > 0) {
     if (EVP_DigestUpdate(ctx.get(), buffer, static_cast<size_t>(file.gcount())) != 1) {
-      if (error != nullptr) {
-        *error = "EVP_DigestUpdate failed";
-      }
-      return {};
+      return UnexpectedError("EVP_DigestUpdate failed");
     }
   }
 
-  return FinalizeHashToHex(ctx.get(), error);
+  return FinalizeHashToHex(ctx.get());
 }
 
 } // namespace
@@ -227,7 +214,7 @@ std::unique_ptr<ScopedTempDir> ScopedTempDir::Create(const std::filesystem::path
     tmpl = (dir / (std::string(prefix) + "XXXXXX")).string();
   }
 
-  char* result = ::mkdtemp(tmpl.data());
+  const char* result = ::mkdtemp(tmpl.data());
   if (result == nullptr) {
     if (error != nullptr) {
       *error = "Failed to create temporary directory: " + std::string(std::strerror(errno));
@@ -275,63 +262,41 @@ ReadOnlyFileMapping& ReadOnlyFileMapping::operator=(ReadOnlyFileMapping&& other)
   return *this;
 }
 
-ReadOnlyFileMapping ReadOnlyFileMapping::Map(const std::filesystem::path& path,
-                                             std::string* error) {
-  ReadOnlyFileMapping result;
+Expected<ReadOnlyFileMapping> ReadOnlyFileMapping::Map(const std::filesystem::path& path) {
   std::error_code fs_ec;
   const auto status = std::filesystem::status(path, fs_ec);
   if (fs_ec || !std::filesystem::exists(status)) {
-    if (error != nullptr) {
-      *error = "file does not exist or is inaccessible: " + path.string();
-    }
-    return result;
+    return UnexpectedError("file does not exist or is inaccessible: " + path.string());
   }
 
   if (std::filesystem::is_directory(status)) {
-    if (error != nullptr) {
-      *error = "cannot map directory: " + path.string();
-    }
-    return result;
+    return UnexpectedError("cannot map directory: " + path.string());
   }
 
+  ReadOnlyFileMapping result;
   const auto file_size = std::filesystem::file_size(path, fs_ec);
   if (!fs_ec && file_size == 0) {
     std::ifstream probe(path, std::ios::binary);
     if (!probe.is_open()) {
-      if (error != nullptr) {
-        *error = "failed to open empty file for reading: " + path.string();
-      }
-      return result;
+      return UnexpectedError("failed to open empty file for reading: " + path.string());
     }
     // Verify that the file is genuinely empty rather than a pseudo-file with size 0 (e.g.
     // /proc/...).
     if (probe.peek() == std::ifstream::traits_type::eof()) {
       result.is_empty_file_ = true;
-      if (error != nullptr) {
-        error->clear();
-      }
       return result;
     }
-    if (error != nullptr) {
-      *error = "cannot memory map pseudo-file with dynamic contents: " + path.string();
-    }
-    return result;
+    return UnexpectedError("cannot memory map pseudo-file with dynamic contents: " + path.string());
   }
 
   std::error_code mmap_ec;
   auto impl = std::make_unique<Impl>();
   impl->mmap = mio::make_mmap_source(path.string(), mmap_ec);
   if (mmap_ec || !impl->mmap.is_open()) {
-    if (error != nullptr) {
-      *error = "failed to map file: " + mmap_ec.message();
-    }
-    return result;
+    return UnexpectedError("failed to map file: " + mmap_ec.message());
   }
 
   result.impl_ = std::move(impl);
-  if (error != nullptr) {
-    error->clear();
-  }
   return result;
 }
 
@@ -371,14 +336,14 @@ bool ReadOnlyFileMapping::IsEmpty() const noexcept {
   return Size() == 0;
 }
 
-ReadOnlyFileMapping MapFileReadOnly(const std::filesystem::path& path, std::string* error) {
-  return ReadOnlyFileMapping::Map(path, error);
+Expected<ReadOnlyFileMapping> MapFileReadOnly(const std::filesystem::path& path) {
+  return ReadOnlyFileMapping::Map(path);
 }
 
 bool ResolveSymlinkPath(const std::filesystem::path& path, std::filesystem::path* resolved,
                         std::string* error) {
-  if (!resolved) {
-    if (error) {
+  if (resolved == nullptr) {
+    if (error != nullptr) {
       *error = "ResolveSymlinkPath requires a destination path.";
     }
     return false;
@@ -394,31 +359,21 @@ bool EnsureParentDirectory(const std::filesystem::path& path, std::string* error
   std::error_code ec;
   std::filesystem::create_directories(parent, ec);
   if (ec) {
-    if (error)
+    if (error != nullptr) {
       *error = "Failed to create directory " + parent.string() + ": " + ec.message();
+    }
     return false;
   }
   return true;
 }
 
-bool ReadTextFile(const std::filesystem::path& path, std::string* content, std::string* error,
-                  size_t max_bytes) {
-  if (content == nullptr) {
-    if (error != nullptr) {
-      *error = "ReadTextFile requires a destination buffer.";
-    }
-    return false;
-  }
-
+Expected<std::string> ReadTextFile(const std::filesystem::path& path, size_t max_bytes) {
   std::ifstream file(path, std::ios::binary);
   if (!file.is_open()) {
-    if (error != nullptr) {
-      *error = "Failed to open file " + path.string();
-    }
-    return false;
+    return UnexpectedError("Failed to open file " + path.string());
   }
 
-  content->clear();
+  std::string content;
   if (max_bytes > 0) {
     std::error_code ec;
     const auto sz = std::filesystem::file_size(path, ec);
@@ -426,7 +381,7 @@ bool ReadTextFile(const std::filesystem::path& path, std::string* content, std::
     if (!ec && sz > 0) {
       initial_cap = std::min(max_bytes, static_cast<size_t>(sz));
     }
-    content->reserve(initial_cap);
+    content.reserve(initial_cap);
 
     char chunk[8192];
     size_t total_read = 0;
@@ -437,46 +392,38 @@ bool ReadTextFile(const std::filesystem::path& path, std::string* content, std::
       if (bytes_read <= 0) {
         break;
       }
-      content->append(chunk, static_cast<size_t>(bytes_read));
+      content.append(chunk, static_cast<size_t>(bytes_read));
       total_read += static_cast<size_t>(bytes_read);
     }
   } else {
-    content->assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+    content.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
   }
 
   if (!file.good() && !file.eof()) {
-    if (error != nullptr) {
-      *error = "Failed to read file " + path.string();
-    }
-    return false;
+    return UnexpectedError("Failed to read file " + path.string());
   }
 
-  if (error != nullptr) {
-    error->clear();
-  }
-  return true;
+  return content;
 }
 
-bool AtomicWriteTextFile(const std::filesystem::path& target, std::string_view content,
-                         std::string* error) {
+Expected<void> AtomicWriteTextFile(const std::filesystem::path& target, std::string_view content) {
   std::filesystem::path resolved_target;
-  if (!ResolveSymlinkPath(target, &resolved_target, error)) {
-    return false;
+  std::string error;
+  if (!ResolveSymlinkPath(target, &resolved_target, &error)) {
+    return UnexpectedError(error);
   }
 
-  if (!EnsureParentDirectory(resolved_target, error)) {
-    return false;
+  if (!EnsureParentDirectory(resolved_target, &error)) {
+    return UnexpectedError(error);
   }
 
   auto tmp_path =
       resolved_target.parent_path() / (resolved_target.filename().string() + ".tmp.XXXXXX");
   std::string tmp_str = tmp_path.string();
 
-  int fd = mkstemp(tmp_str.data());
+  const int fd = mkstemp(tmp_str.data());
   if (fd < 0) {
-    if (error)
-      *error = std::string("mkstemp failed: ") + std::strerror(errno);
-    return false;
+    return UnexpectedError(std::string("mkstemp failed: ") + std::strerror(errno));
   }
 
   std::error_code status_ec;
@@ -489,26 +436,25 @@ bool AtomicWriteTextFile(const std::filesystem::path& target, std::string_view c
   const char* data = content.data();
   size_t remaining = content.size();
   while (remaining > 0) {
-    ssize_t written = write(fd, data, remaining);
+    const ssize_t written = write(fd, data, remaining);
     if (written < 0) {
-      if (errno == EINTR)
+      if (errno == EINTR) {
         continue;
-      if (error)
-        *error = std::string("write failed: ") + std::strerror(errno);
+      }
+      const std::string err = std::string("write failed: ") + std::strerror(errno);
       close(fd);
       unlink(tmp_str.c_str());
-      return false;
+      return UnexpectedError(err);
     }
     data += written;
     remaining -= static_cast<size_t>(written);
   }
 
   if (fsync(fd) != 0) {
-    if (error)
-      *error = std::string("fsync failed: ") + std::strerror(errno);
+    const std::string err = std::string("fsync failed: ") + std::strerror(errno);
     close(fd);
     unlink(tmp_str.c_str());
-    return false;
+    return UnexpectedError(err);
   }
 
   close(fd);
@@ -516,33 +462,22 @@ bool AtomicWriteTextFile(const std::filesystem::path& target, std::string_view c
   std::error_code ec;
   std::filesystem::rename(tmp_str, resolved_target, ec);
   if (ec) {
-    if (error)
-      *error = "rename failed: " + ec.message();
     unlink(tmp_str.c_str());
-    return false;
+    return UnexpectedError("rename failed: " + ec.message());
   }
 
-  if (error != nullptr) {
-    error->clear();
-  }
-  return true;
+  return {};
 }
 
-std::string ComputeFileSha256(const std::filesystem::path& path, std::string* error) {
+Expected<std::string> ComputeFileSha256(const std::filesystem::path& path) {
   std::error_code fs_ec;
   const auto status = std::filesystem::status(path, fs_ec);
   if (fs_ec || !std::filesystem::exists(status)) {
-    if (error != nullptr) {
-      *error = "failed to open file for SHA-256 calculation: " + path.string();
-    }
-    return {};
+    return UnexpectedError("failed to open file for SHA-256 calculation: " + path.string());
   }
 
   if (std::filesystem::is_directory(status)) {
-    if (error != nullptr) {
-      *error = "failed to open file for SHA-256 calculation: " + path.string();
-    }
-    return {};
+    return UnexpectedError("failed to open file for SHA-256 calculation: " + path.string());
   }
 
   const auto file_size = std::filesystem::file_size(path, fs_ec);
@@ -551,54 +486,39 @@ std::string ComputeFileSha256(const std::filesystem::path& path, std::string* er
     // Verify file readability first.
     std::ifstream probe(path, std::ios::binary);
     if (!probe.is_open()) {
-      if (error != nullptr) {
-        *error = "failed to open file for SHA-256 calculation: " + path.string();
-      }
-      return {};
+      return UnexpectedError("failed to open file for SHA-256 calculation: " + path.string());
     }
     // Confirm it's truly empty, rather than a virtual pseudo-file with st_size = 0 (e.g. /proc/...)
     if (probe.peek() == std::ifstream::traits_type::eof()) {
-      if (error != nullptr) {
-        error->clear();
-      }
       return std::string(kEmptyFileSha256);
     }
     // If it yields bytes despite st_size == 0, fallback to streaming read.
-    return ComputeFileSha256StreamFallback(path, error);
+    return ComputeFileSha256StreamFallback(path);
   }
 
-  auto mapping = ReadOnlyFileMapping::Map(path, nullptr);
-  if (mapping.IsValid()) {
+  auto mapping = ReadOnlyFileMapping::Map(path);
+  if (mapping) {
     const std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> ctx(EVP_MD_CTX_new(),
                                                                       &EVP_MD_CTX_free);
     if (ctx == nullptr) {
-      if (error != nullptr) {
-        *error = "failed to allocate EVP_MD_CTX";
-      }
-      return {};
+      return UnexpectedError("failed to allocate EVP_MD_CTX");
     }
 
     if (EVP_DigestInit_ex(ctx.get(), EVP_sha256(), nullptr) != 1) {
-      if (error != nullptr) {
-        *error = "EVP_DigestInit_ex failed";
-      }
-      return {};
+      return UnexpectedError("EVP_DigestInit_ex failed");
     }
 
-    const auto sv = mapping.StringView();
+    const auto sv = mapping->StringView();
     if (!sv.empty()) {
       if (EVP_DigestUpdate(ctx.get(), sv.data(), sv.size()) != 1) {
-        if (error != nullptr) {
-          *error = "EVP_DigestUpdate failed";
-        }
-        return {};
+        return UnexpectedError("EVP_DigestUpdate failed");
       }
     }
 
-    return FinalizeHashToHex(ctx.get(), error);
+    return FinalizeHashToHex(ctx.get());
   }
 
-  return ComputeFileSha256StreamFallback(path, error);
+  return ComputeFileSha256StreamFallback(path);
 }
 
 bool IsDirectoryWritable(const std::filesystem::path& path) {
