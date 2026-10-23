@@ -58,6 +58,12 @@ enum class ActionType : std::uint8_t {
   ReplaceIfDefault,
   IniReplaceKey,
   IniRemoveKey,
+  // Repairs the `[[x]]` double nesting written by the glaze initializer_list
+  // bug (#460) by replacing `[x]` with the inner `x` array. Idempotent: flat
+  // values are left untouched.
+  UnwrapSingleArray,
+  // Repairs the `[{...}]` double nesting by replacing it with the inner object.
+  UnwrapSingleObject,
 };
 
 struct MigrationRule {
@@ -136,6 +142,15 @@ const std::vector<MigrationRule>& GetRules() {
        {},
        300,
        500},
+
+      // v2.4.2: Repair glaze json_t initializer_list double nesting (#460).
+      // Buggy writers (7e6d77c, #447) emitted `[[...]]` / `[{...}]`, which the
+      // typed accessors silently read as empty. Idempotent on flat values.
+      {"2.4.2", "config.json", ActionType::UnwrapSingleArray, "registry.base_urls"},
+      {"2.4.2", "config.json", ActionType::UnwrapSingleArray, "asr.providers.*.args"},
+      {"2.4.2", "config.json", ActionType::UnwrapSingleObject, "asr.providers.*.env"},
+      {"2.4.2", "config.json", ActionType::UnwrapSingleArray, "llm.adapters.*.args"},
+      {"2.4.2", "config.json", ActionType::UnwrapSingleObject, "llm.adapters.*.env"},
   };
   return kRules;
 }
@@ -267,6 +282,38 @@ bool ApplyActionToTarget(glz::json_t& parent, const std::string& key, std::strin
             .file = "config.json",
             .description = desc_prefix + ": upgraded legacy default " +
                            FormatJson(rule.expected_value) + " to " + FormatJson(rule.to_value),
+        });
+        return true;
+      }
+    }
+    return false;
+  }
+  case ActionType::UnwrapSingleArray: {
+    if (parent.is_object() && parent.contains(key)) {
+      auto& val = parent[key];
+      const auto* array = val.get_if<glz::json_t::array_t>();
+      if (array != nullptr && array->size() == 1 &&
+          (*array)[0].get_if<glz::json_t::array_t>() != nullptr) {
+        val = (*array)[0];
+        changes.push_back({
+            .file = "config.json",
+            .description = desc_prefix + ": unwrapped double-nested array '[[...]]' to '[...]'",
+        });
+        return true;
+      }
+    }
+    return false;
+  }
+  case ActionType::UnwrapSingleObject: {
+    if (parent.is_object() && parent.contains(key)) {
+      auto& val = parent[key];
+      const auto* array = val.get_if<glz::json_t::array_t>();
+      if (array != nullptr && array->size() == 1 &&
+          (*array)[0].get_if<glz::json_t::object_t>() != nullptr) {
+        val = (*array)[0];
+        changes.push_back({
+            .file = "config.json",
+            .description = desc_prefix + ": unwrapped double-nested object '[{...}]' to '{...}'",
         });
         return true;
       }

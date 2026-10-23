@@ -36,7 +36,7 @@ void TestFastPath() {
   const auto conf_path = tmp_dir / "vinput.conf";
 
   glz::json_t valid_cfg = glz::json_t(glz::json_t::object_t{});
-  valid_cfg["version"] = ">=2.4.0";
+  valid_cfg["version"] = ">=2.4.2";
   valid_cfg["asr"]["vad"]["threshold"] = 0.35;
   ExpectTrue(
       vinput::file::AtomicWriteTextFile(config_path, vinput::json::ToText(valid_cfg)).has_value());
@@ -161,8 +161,8 @@ void TestDryRunAndApply() {
              "min_silence_duration upgraded to 1.2");
   ExpectEq(std::to_string(vinput::json::Int(vad, "speech_pad_ms")), "500",
            "speech_pad_ms upgraded to 500");
-  ExpectEq(vinput::json::String(migrated_cfg, "version"), ">=2.4.0",
-           "version stamped with >=2.4.0");
+  ExpectEq(vinput::json::String(migrated_cfg, "version"), ">=2.4.2",
+           "version stamped with >=2.4.2");
 
   std::string migrated_conf_str;
   auto r_conf = vinput::file::ReadTextFile(conf_path);
@@ -352,6 +352,107 @@ void TestUndefinedFieldsAndIntegrityPreserved() {
   std::filesystem::remove_all(tmp_dir, ec);
 }
 
+// Repairs a config.json corrupted by the glaze initializer_list double
+// nesting bug (#460): `[[...]]` arrays and `[{...}]` objects must be unwrapped
+// in place, with values and unrelated fields preserved, and the migration must
+// be idempotent.
+void TestGlazeDoubleNestingRepair() {
+  const auto tmp_dir = std::filesystem::temp_directory_path() / "vinput_test_mig_glaze_nesting";
+  std::filesystem::remove_all(tmp_dir);
+  std::filesystem::create_directories(tmp_dir);
+
+  const auto config_path = tmp_dir / "config.json";
+  const auto conf_path = tmp_dir / "vinput.conf";
+
+  const std::string corrupted_config = R"({
+    "version": ">=2.4.0",
+    "registry": {
+        "base_urls": [
+            [
+                "https://registry.example/main"
+            ]
+        ]
+    },
+    "asr": {
+        "active_provider": "provider.x.streaming",
+        "providers": [
+            {
+                "id": "provider.x.streaming",
+                "type": "command",
+                "command": "python3",
+                "args": [
+                    [
+                        "/home/u/.local/share/vinput/providers/x/streaming"
+                    ]
+                ],
+                "env": [
+                    {
+                        "VINPUT_ASR_APP_ID": "123"
+                    }
+                ],
+                "timeout_ms": 60000
+            }
+        ]
+    },
+    "llm": {
+        "providers": [],
+        "adapters": []
+    },
+    "scenes": {
+        "active_scene": "__raw__",
+        "definitions": [
+            {
+                "id": "__raw__"
+            }
+        ]
+    }
+}
+)";
+  ExpectTrue(vinput::file::AtomicWriteTextFile(config_path, corrupted_config).has_value());
+  ExpectTrue(vinput::file::AtomicWriteTextFile(conf_path, "[Trigger]\nTriggerKey=Alt_R\n").has_value());
+
+  const auto report = vinput::migration::RunConfigMigration(false, config_path, conf_path);
+  ExpectTrue(report.error.empty(), report.error);
+  ExpectTrue(report.needed, "Migration must detect double nesting");
+  ExpectTrue(report.applied, "Migration must apply double nesting repair");
+  ExpectTrue(!report.config_backup.empty(), "A config backup must be created");
+
+  auto read_res = vinput::file::ReadTextFile(config_path);
+  ExpectTrue(read_res.has_value(), read_res ? "" : read_res.error());
+  glz::json_t repaired;
+  ExpectTrue(!bool(glz::read_json(repaired, *read_res)), "repaired config must parse");
+
+  // base_urls: [[url]] -> [url]
+  ExpectTrue(vinput::json::Strings(repaired["registry"]["base_urls"]) ==
+                     std::vector<std::string>{"https://registry.example/main"},
+                 "base_urls must be unwrapped to a flat array");
+
+  // providers[0]: args [[path]] -> [path], env [{...}] -> {...}
+  auto& provider = repaired["asr"]["providers"][0];
+  ExpectTrue(vinput::json::Strings(provider["args"]) ==
+                     std::vector<std::string>{"/home/u/.local/share/vinput/providers/x/streaming"},
+                 "args must be unwrapped to a flat array");
+  const std::map<std::string, std::string> env = vinput::json::StringMap(provider["env"]);
+  ExpectTrue(env.count("VINPUT_ASR_APP_ID") == 1 && env.at("VINPUT_ASR_APP_ID") == "123",
+             "env must be unwrapped to a flat object with values preserved");
+
+  // Unrelated fields must survive untouched.
+  ExpectTrue(vinput::json::ToText(provider["command"]) == "\"python3\"",
+             "command must be preserved");
+  ExpectTrue(vinput::json::ToText(repaired["asr"]["active_provider"]) == "\"provider.x.streaming\"",
+             "active_provider must be preserved");
+  ExpectTrue(vinput::json::ToText(repaired["scenes"]["definitions"][0]["id"]) == "\"__raw__\"",
+             "unrelated fields must be preserved");
+
+  // Idempotency: a repaired config (already at max rule version) is stable.
+  const auto second_report = vinput::migration::RunConfigMigration(false, config_path, conf_path);
+  ExpectTrue(second_report.error.empty(), second_report.error);
+  ExpectTrue(!second_report.needed, "Second run must not need migration again");
+
+  std::error_code ec;
+  std::filesystem::remove_all(tmp_dir, ec);
+}
+
 } // namespace
 
 int main() {
@@ -361,6 +462,7 @@ int main() {
   TestDefaultTemplateFastPath();
   TestVersionConstraintAndCustomizationPreserved();
   TestUndefinedFieldsAndIntegrityPreserved();
+  TestGlazeDoubleNestingRepair();
   std::cout << "All test_config_migration tests passed!\n";
   return 0;
 }
