@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <glaze/json/json_t.hpp>
 #include <string>
 #include <vector>
 
@@ -30,5 +31,11 @@ bool HasPendingMigrations(const std::filesystem::path& config_path = {},
 MigrationReport RunConfigMigration(bool dry_run = false,
                                    const std::filesystem::path& config_path = {},
                                    const std::filesystem::path& conf_path = {});
+
+// Repairs glaze initializer_list double nesting (`[[...]]` / `[{...}]`) written by
+// buggy writers (see issue #460) on an already-parsed config tree, in memory.
+// Returns true when anything was unwrapped. Reuses the unwrap migration rules so
+// the repair logic stays in sync with `vinput config migrate`.
+bool RepairGlazeDoubleNesting(glz::json_t& config);
 
 } // namespace vinput::migration

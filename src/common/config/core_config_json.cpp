@@ -14,6 +14,7 @@
 #include <variant>
 #include <vector>
 
+#include "common/config/config_migration.h"
 #include "common/config/core_config.h"
 #include "common/config/core_config_types.h"
 #include "common/json/json_access.h"
@@ -570,6 +571,11 @@ bool CoreConfigFromJson(std::string_view text, CoreConfig* config, std::string* 
     }
     return false;
   }
+
+  // Repair glaze initializer_list double nesting in memory (issue #460) so the
+  // typed parse below sees flat values; the next save then persists the repair
+  // instead of erasing the damaged fields while they still hold real data.
+  vinput::migration::RepairGlazeDoubleNesting(root);
 
   CoreConfig parsed;
   if (const auto* version = vinput::json::Find(root, "version"); version != nullptr) {

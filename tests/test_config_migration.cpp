@@ -7,6 +7,7 @@
 #include <system_error>
 
 #include "common/config/config_migration.h"
+#include "common/config/core_config.h"
 #include "common/json/json_access.h"
 #include "common/utils/file_utils.h"
 
@@ -453,6 +454,52 @@ void TestGlazeDoubleNestingRepair() {
   std::filesystem::remove_all(tmp_dir, ec);
 }
 
+// Typed loads must observe repaired (flat) values so a subsequent ordinary save
+// persists the repair instead of wiping the original nested data (review
+// finding: "normal config saves erase damaged values").
+void TestTypedLoadSeesRepairedValues() {
+  const std::string corrupted = R"({
+    "version": ">=2.4.0",
+    "registry": {
+        "base_urls": [["https://registry.example/main"]]
+    },
+    "asr": {
+        "active_provider": "provider.x.streaming",
+        "providers": [
+            {
+                "id": "provider.x.streaming",
+                "type": "command",
+                "command": "python3",
+                "args": [["/home/u/.local/share/vinput/providers/x/streaming"]],
+                "env": [{"VINPUT_ASR_APP_ID": "123"}],
+                "timeout_ms": 60000
+            }
+        ]
+    }
+  }
+)";
+
+  CoreConfig config;
+  std::string error;
+  ExpectTrue(CoreConfigFromJson(corrupted, &config, &error), error);
+
+  bool args_ok = false;
+  std::string env_value;
+  for (const auto& provider : config.asr.providers) {
+    if (const auto* command = std::get_if<CommandAsrProvider>(&provider)) {
+      args_ok =
+          command->args == std::vector<std::string>{"/home/u/.local/share/vinput/providers/x/streaming"};
+      env_value =
+          command->env.count("VINPUT_ASR_APP_ID") == 1 ? command->env.at("VINPUT_ASR_APP_ID") : "";
+    }
+  }
+  ExpectTrue(args_ok, "typed load must expose repaired flat args");
+  ExpectTrue(env_value == "123", "typed load must expose repaired env values");
+  ExpectTrue(config.registry.baseUrls.size() == 1 &&
+                 config.registry.baseUrls.front() == "https://registry.example/main",
+             "typed load must expose repaired base_urls");
+}
+
 } // namespace
 
 int main() {
@@ -463,6 +510,7 @@ int main() {
   TestVersionConstraintAndCustomizationPreserved();
   TestUndefinedFieldsAndIntegrityPreserved();
   TestGlazeDoubleNestingRepair();
+  TestTypedLoadSeesRepairedValues();
   std::cout << "All test_config_migration tests passed!\n";
   return 0;
 }

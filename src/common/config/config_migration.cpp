@@ -294,7 +294,11 @@ bool ApplyActionToTarget(glz::json_t& parent, const std::string& key, std::strin
       const auto* array = val.get_if<glz::json_t::array_t>();
       if (array != nullptr && array->size() == 1 &&
           (*array)[0].get_if<glz::json_t::array_t>() != nullptr) {
-        val = (*array)[0];
+        // Copy the inner node first: `val = (*array)[0]` self-referentially
+        // copy-assigns from storage owned by `val`, which is UB (verified by
+        // AddressSanitizer: heap-use-after-free inside json_t::operator=).
+        glz::json_t inner = (*array)[0];
+        val = std::move(inner);
         changes.push_back({
             .file = "config.json",
             .description = desc_prefix + ": unwrapped double-nested array '[[...]]' to '[...]'",
@@ -310,7 +314,9 @@ bool ApplyActionToTarget(glz::json_t& parent, const std::string& key, std::strin
       const auto* array = val.get_if<glz::json_t::array_t>();
       if (array != nullptr && array->size() == 1 &&
           (*array)[0].get_if<glz::json_t::object_t>() != nullptr) {
-        val = (*array)[0];
+        // Same self-referential guard as UnwrapSingleArray above.
+        glz::json_t inner = (*array)[0];
+        val = std::move(inner);
         changes.push_back({
             .file = "config.json",
             .description = desc_prefix + ": unwrapped double-nested object '[{...}]' to '{...}'",
@@ -478,6 +484,25 @@ bool ApplyIniRule(fcitx::RawConfig& root, const MigrationRule& rule,
 }
 
 } // namespace
+
+bool RepairGlazeDoubleNesting(glz::json_t& config) {
+  if (!config.is_object()) {
+    return false;
+  }
+  std::vector<MigrationChange> changes;
+  for (const auto& rule : GetRules()) {
+    if (rule.target_file != "config.json") {
+      continue;
+    }
+    if (rule.action != ActionType::UnwrapSingleArray &&
+        rule.action != ActionType::UnwrapSingleObject) {
+      continue;
+    }
+    const auto segments = vinput::str::Split(rule.path, '.');
+    WalkAndApply(config, segments, "", rule, changes);
+  }
+  return !changes.empty();
+}
 
 bool HasPendingMigrations(const std::filesystem::path& config_path,
                           const std::filesystem::path& conf_path) {
