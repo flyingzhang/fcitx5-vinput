@@ -137,22 +137,26 @@ inline std::map<std::string, std::string> StringMap(const glz::json_t& object,
 }
 
 // Builds a JSON array out of a string container.
+// Uses direct (functional) initialization on purpose: brace initialization
+// like `return {std::move(array)}` resolves to json_t's initializer_list
+// constructor, which would wrap the array in ANOTHER array (`[[...]]`).
 template <typename Container> glz::json_t FromStrings(const Container& values) {
   glz::json_t::array_t array;
   array.reserve(values.size());
   for (const auto& value : values) {
     array.emplace_back(value);
   }
-  return {std::move(array)};
+  return glz::json_t(std::move(array));
 }
 
 // Builds a JSON object out of a string map.
+// Direct initialization for the same reason as FromStrings above.
 inline glz::json_t FromStringMap(const std::map<std::string, std::string>& values) {
   glz::json_t::object_t object;
   for (const auto& [key, value] : values) {
     object.emplace(key, glz::json_t(value));
   }
-  return {std::move(object)};
+  return glz::json_t(std::move(object));
 }
 
 // Shared empty object, used as the fallback of Object().
