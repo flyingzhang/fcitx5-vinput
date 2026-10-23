@@ -155,6 +155,20 @@ target_link_libraries(test_config_migration PRIVATE
 
 add_test(NAME test_config_migration COMMAND test_config_migration)
 
+add_executable(test_json_access
+    test_json_access.cpp
+)
+
+target_include_directories(test_json_access PRIVATE
+    ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(test_json_access PRIVATE
+    common
+)
+
+add_test(NAME test_json_access COMMAND test_json_access)
+
 add_executable(test_unity_input_gain
     test_unity_input_gain.cpp
     ${CMAKE_SOURCE_DIR}/src/daemon/audio/audio_utils.cpp
